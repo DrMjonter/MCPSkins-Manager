@@ -28,7 +28,9 @@ function draft(overrides = {}) {
     return {...emptyDraft(), weapon: 'tacz:ai_awp', label: 'Aurora', collection: 'Winter', description: 'Snow & stars ☃', ...overrides};
 }
 
-test('all mappings, rarity colors, and palettes match the Python source exactly', () => {
+const pythonReferenceOptions = {skip: fs.existsSync(path.join(__dirname, '..', 'MCPSkins_Asset_Manager.py')) ? false : 'Optional local Python reference is not present'};
+
+test('all mappings, rarity colors, and palettes match the Python source exactly', pythonReferenceOptions, () => {
     const script = "import ast,json,pathlib; t=ast.parse(pathlib.Path('MCPSkins_Asset_Manager.py').read_text(encoding='utf-8')); print(json.dumps({n.targets[0].id:ast.literal_eval(n.value) for n in t.body if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and n.targets[0].id in ('RARITIES','GUN_NAMES','THEMES')}))";
     const actual = JSON.parse(execFileSync('python', ['-c', script], {cwd: path.join(__dirname, '..'), encoding: 'utf8'}));
     assert.deepEqual({RARITIES, GUN_NAMES, THEMES}, actual);
@@ -37,7 +39,7 @@ test('all mappings, rarity colors, and palettes match the Python source exactly'
     assert.equal(displayGun('other:path/custom_weapon'), 'CUSTOM WEAPON');
 });
 
-test('new skin JSON matches the original Python save method', t => {
+test('new skin JSON matches the original Python save method', pythonReferenceOptions, t => {
     const f = fixture(t);
     const input = draft({rarity: 'rare', color: '#3be1ff', locked_text: ' Locked ', unlocked: true, include_weight: true, weight: '007'});
     const result = f.repository.save(input);

@@ -3,3 +3,7 @@ __pycache__/
 .test-artifacts/
 node_modules/
 dist/
+
+# Local copies of the original standalone applications
+/MCPSkins_Asset_Manager.py
+/MCPSkins_Asset_Manager_EXE_Ready.py

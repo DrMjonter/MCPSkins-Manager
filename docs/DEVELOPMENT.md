@@ -1,10 +1,10 @@
 # Development and release packaging
 
-The plugin source is split into domain rules, storage, assets, state/controller, UI, and Blockbench/desktop adapters. The two Python applications remain as unchanged compatibility references. `mcpskins_asset_manager.js` is generated; edit `src/` and rebuild instead of editing the bundle.
+The plugin source is split into domain rules, storage, assets, state/controller, UI, and Blockbench/desktop adapters. The original standalone Python applications are excluded from Git. Optional local copies can be kept in the root folder for compatibility checks. `mcpskins_asset_manager.js` is generated; edit `src/` and rebuild instead of editing the bundle.
 
 ## Build and verify
 
-Requirements: Python 3.9+ for bundling and Node 20+ for tests. The build and tests have no npm dependencies. Python compatibility tests also use the standard-library Tkinter module from the Python reference application.
+Requirements: Python 3.9+ for bundling and Node 20+ for tests. The build and tests have no npm dependencies. The two optional Python reference comparisons require a local `MCPSkins_Asset_Manager.py` and its standard-library Tkinter module; they skip when that reference is absent.
 
 ```powershell
 python tools/build.py
