@@ -70,4 +70,23 @@ function prepareSkin(fs, paths, draft) {
     return {model, texture, ...maps, created};
 }
 
-module.exports = {assetSelection, modelForWeapon, prepareSkin};
+function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
+    const source = assetSelection(paths, sourceDraft), target = assetSelection(paths, targetDraft);
+    if (source.folder !== target.folder || source.id === target.id) throw new Error('Choose a different skin ID for the duplicate.');
+    const copies = [];
+    for (const extension of ['.json', '.geo.json', '.png', '_n.png', '_s.png', '_hud.png', '_icon.png']) {
+        const from = paths.path.join(source.folder, source.id + extension), to = paths.path.join(target.folder, target.id + extension);
+        if (fs.existsSync(to)) throw new Error(`Duplicate asset already exists: ${to}`);
+        if (isFile(fs, from)) copies.push([from, to]);
+    }
+    const created = [];
+    try {
+        for (const [from, to] of copies) { fs.copyFileSync(from, to, 1); created.push(to); }
+    } catch (error) {
+        for (const file of created) fs.unlinkSync(file);
+        throw error;
+    }
+    return created;
+}
+
+module.exports = {assetSelection, modelForWeapon, prepareSkin, duplicateAssets};

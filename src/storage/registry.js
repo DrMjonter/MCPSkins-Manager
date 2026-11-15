@@ -1,5 +1,7 @@
 'use strict';
-const {isObject, clone, validateRegistry, baseWeapon, equalJSON, buildEntry} = require('../domain/skin');
+const {isObject, clone, validateRegistry, baseWeapon, equalJSON, buildEntry, draftFromRow} = require('../domain/skin');
+const {duplicateAssets} = require('../assets/preparation');
+const {RARITIES} = require('../domain/constants');
 const {readJSON, atomicJSON, isDirectory} = require('./files');
 
 class RegistryRepository {
@@ -22,8 +24,68 @@ class RegistryRepository {
         }
         return {rows, warnings, missing: false};
     }
-    save(draft, selected = null, defaultPrefix = null) {
-        const {weapon, entry} = buildEntry(draft, selected && selected.skin, defaultPrefix);
+    saveBatch(rows, draft, changedFields) {
+        const allowed = {rarity: 'rarity', color: 'label_color', collection: 'collection', description: 'description',
+            is_new: 'is_new', locked_text: 'locked_text', unlocked: 'unlocked', include_weight: 'weight', weight: 'weight'};
+        const fields = [...new Set(changedFields)];
+        if (fields.some(key => !Object.hasOwn(allowed, key))) throw new Error('Identity fields cannot be edited in bulk.');
+        const patch = {};
+        for (const key of fields) {
+            let value = draft[key];
+            if (['collection', 'description', 'locked_text'].includes(key)) {
+                value = value.trim();
+                if (key !== 'locked_text' && !value) throw new Error('Collection and description are required.');
+            }
+            if (key === 'rarity') {
+                value = value.toLowerCase();
+                if (!Object.hasOwn(RARITIES, value)) throw new Error('Choose a supported rarity.');
+            }
+            if (key === 'color') {
+                if (!/^#[0-9a-f]{6}$/i.test(value.trim())) throw new Error('Use a six-digit label color.');
+                value = '0x' + value.trim().slice(1).toUpperCase();
+            }
+            if (key === 'include_weight' || key === 'weight') {
+                if (draft.include_weight) {
+                    const text = String(draft.weight).trim();
+                    if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(Number(text)) || Number(text) < 1) throw new Error('Weight must be a positive safe whole number.');
+                    value = Number(text);
+                } else value = undefined;
+            }
+            if ((key === 'locked_text' && !value) || (key === 'unlocked' && !value)) value = undefined;
+            patch[allowed[key]] = value;
+        }
+        const groups = new Map();
+        for (const row of rows) {
+            if (!groups.has(row.filename)) {
+                const data = this.read(row.filename);
+                groups.set(row.filename, {data, original: clone(data)});
+            }
+            const {data} = groups.get(row.filename);
+            if (baseWeapon(data) !== baseWeapon(row.data) || !equalJSON(data.skins[row.index], row.skin)) throw new Error('A selected entry changed on disk. Refresh Files before saving.');
+            for (const [key, value] of Object.entries(patch)) {
+                if (value === undefined) delete data.skins[row.index][key];
+                else data.skins[row.index][key] = value;
+            }
+        }
+        const written = [];
+        try {
+            if (fields.length) for (const [filename, group] of groups) {
+                atomicJSON(this.fs, filename, group.data);
+                written.push(filename);
+            }
+        } catch (error) {
+            const failures = [];
+            for (const filename of written.reverse()) {
+                try { atomicJSON(this.fs, filename, groups.get(filename).original); }
+                catch { failures.push(filename); }
+            }
+            if (failures.length) throw new Error(`${error.message} Some files could not be restored: ${failures.join(', ')}. Refresh Files to inspect them.`);
+            throw error;
+        }
+        return {count: rows.length};
+    }
+    save(draft, selected = null, defaultPrefix = null, duplicate = null) {
+        const {weapon, entry} = buildEntry(draft, selected ? selected.skin : duplicate ? duplicate.skin : null, defaultPrefix);
         const filename = selected ? selected.filename : this.paths.registry(weapon);
         let data;
         if (selected) {
@@ -42,7 +104,9 @@ class RegistryRepository {
         }
         data.skins[index] = entry;
         this.fs.mkdirSync(this.paths.registryDirectory, {recursive: true});
-        atomicJSON(this.fs, filename, data);
+        const created = duplicate ? duplicateAssets(this.fs, this.paths, draftFromRow(duplicate), draft) : [];
+        try { atomicJSON(this.fs, filename, data); }
+        catch (error) { for (const file of created) this.fs.unlinkSync(file); throw error; }
         return {filename, id: entry.id};
     }
 }

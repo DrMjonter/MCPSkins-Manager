@@ -6,7 +6,7 @@ function previewCards(fs, paths, draft, pathToFileURL) {
     let selection;
     try { selection = assetSelection(paths, draft); } catch { /* Empty editor. */ }
     return [['skin', 'Skin', ''], ['hud', 'HUD', '_hud'], ['icon', 'Icon', '_icon']].map(([kind, label, suffix]) => {
-        const card = {kind, label, source: '', filename: '', dimensions: '', message: 'Select a skin'};
+        const card = {kind, label, source: '', filename: '', dimensions: '', ratio: kind === 'hud' ? '3:1' : kind === 'icon' ? '1:1' : '', message: 'Select a skin'};
         if (!selection) return card;
         const filename = paths.path.join(selection.folder, selection.id + suffix + '.png');
         card.filename = paths.path.basename(filename);

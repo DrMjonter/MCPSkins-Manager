@@ -12,7 +12,11 @@ class StartScreenView {
         this.view = null;
         this.element = null;
         const startScreen = environment.startScreen || StartScreen;
-        this.section = startScreen.addSection('mcpskins_asset_manager', {
+        // 5.1 exposes the section helper globally; 5.2 exposes StartScreen.addSection.
+        const addSection = typeof startScreen.addSection === 'function' ? startScreen.addSection.bind(startScreen)
+            : environment.addStartScreenSection || (typeof addStartScreenSection === 'function' ? addStartScreenSection : null);
+        if (!addSection) throw new Error('Blockbench start-screen sections are unavailable.');
+        this.section = addSection('mcpskins_asset_manager', {
             closable: false,
             text: [
                 {type: 'h3', text: 'MCPSkins Manager'},

@@ -2,6 +2,7 @@
 const {Controller} = require('./controller');
 const {panelComponent} = require('./ui/panel');
 const {StartScreenView} = require('./ui/start-screen');
+const {ManagerKeyboard} = require('./ui/keyboard');
 const styles = require('./ui/styles');
 
 module.exports = function register(nativeRequire) {
@@ -10,7 +11,7 @@ module.exports = function register(nativeRequire) {
     Plugin.register('mcpskins_asset_manager', {
         title: 'MCPSkins Manager', author: 'Mjonter', icon: 'inventory_2',
         description: 'Add, edit, and browse MCPSkins',
-        version: '1.0.8', min_version: '5.2.2', variant: 'desktop',
+        version: '1.1.0', min_version: '5.1.0', variant: 'desktop',
         tags: ['Minecraft: Java Edition', 'Texture'],
         onload() {
             controller = new Controller(nativeRequire);
@@ -43,12 +44,8 @@ module.exports = function register(nativeRequire) {
             });
             startScreen = new StartScreenView(controller);
             closeHandler = event => controller.beforeUnload(event);
-            keyboardHandler = event => {
-                if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 's'
-                    && event.target.closest && event.target.closest('#panel_mcpskins_asset_manager, #mcpskins_start_workspace')) {
-                    event.preventDefault(); event.stopImmediatePropagation(); controller.save();
-                }
-            };
+            const keyboard = new ManagerKeyboard(controller);
+            keyboardHandler = event => keyboard.handle(event);
             window.addEventListener('beforeunload', closeHandler, true);
             window.addEventListener('keydown', keyboardHandler, true);
             controller.start();

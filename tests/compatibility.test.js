@@ -400,3 +400,139 @@ test('manager keeps drafts separate, filters descriptions, resets rarity colors 
     assert.equal(manager.state.rarityFilter, '');
     assert.ok(manager.state.selectedKey);
 });
+
+test('missing HUD and icon previews include aspect ratio hints without a skin texture hint', t => {
+    const f = fixture(t);
+    const cards = previewCards(fs, f.paths, draft(), pathToFileURL);
+    assert.equal(cards[0].ratio, '');
+    assert.equal(cards[1].ratio, '3:1');
+    assert.equal(cards[2].ratio, '1:1');
+    assert.ok(cards.every(card => !card.source));
+});
+
+test('pack metadata defaults, persists within each pack, and preserves future fields', t => {
+    const {metadataFile, loadPackMetadata, savePackMetadata} = require('../src/storage/pack-metadata');
+    const f = fixture(t);
+    fs.mkdirSync(f.paths.pack, {recursive: true});
+    assert.deepEqual(loadPackMetadata(fs, f.paths), {title: 'Pack Name'});
+    assert.equal(fs.existsSync(metadataFile(f.paths)), false);
+    const second = new PackPaths(path, f.root, 'Other', 'example');
+    fs.mkdirSync(second.pack);
+    f.write(metadataFile(f.paths), {title: 'First', future: {keep: [1, 2]}});
+    savePackMetadata(fs, f.paths, {title: '  My skins  '});
+    assert.deepEqual(readJSON(fs, metadataFile(f.paths)), {title: 'My skins', future: {keep: [1, 2]}});
+    savePackMetadata(fs, second, {title: 'Second pack'});
+    assert.equal(loadPackMetadata(fs, f.paths).title, 'My skins');
+    assert.equal(loadPackMetadata(fs, second).title, 'Second pack');
+    assert.equal(metadataFile(f.paths), path.join(f.paths.pack, 'mcpskins_manager.json'));
+    savePackMetadata(fs, f.paths, {title: '   '});
+    assert.equal(loadPackMetadata(fs, f.paths).title, 'Pack Name');
+});
+
+test('invalid metadata and failed writes preserve the existing pack file', t => {
+    const {metadataFile, loadPackMetadata, savePackMetadata} = require('../src/storage/pack-metadata');
+    const f = fixture(t), filename = metadataFile(f.paths);
+    f.write(filename, '{broken');
+    assert.throws(() => loadPackMetadata(fs, f.paths), /Unable to read/);
+    assert.throws(() => savePackMetadata(fs, f.paths, {title: 'Replacement'}));
+    assert.equal(fs.readFileSync(filename, 'utf8'), '{broken');
+    f.write(filename, {title: 'Original'});
+    assert.throws(() => savePackMetadata(fs, f.paths, {title: 123}), /must be text/);
+    fs.writeFileSync(filename + '.tmp', 'occupied');
+    assert.throws(() => savePackMetadata(fs, f.paths, {title: 'Replacement'}));
+    assert.equal(readJSON(fs, filename).title, 'Original');
+});
+
+test('recent pack history deduplicates Windows paths, keeps latest metadata, and limits its length', () => {
+    const {recentPacks, rememberPack} = require('../src/storage/recent-packs');
+    const entry = {directory: 'X:\\packs\\Example', namespace: 'example', title: 'First', author: 'Author'};
+    const history = rememberPack(path.win32, [entry], {...entry, directory: 'x:\\packs\\example\\', title: 'Renamed'});
+    assert.equal(history.length, 1);
+    assert.equal(history[0].title, 'Renamed');
+    assert.equal(history[0].author, 'Author');
+    assert.deepEqual(recentPacks(path.win32, [null, {}, {directory: 'relative', namespace: 'example'}, {...entry, namespace: '../bad'}]), []);
+    const many = Array.from({length: 20}, (_, i) => ({...entry, directory: `X:\\packs\\Pack${i}`}));
+    assert.equal(recentPacks(path.win32, many).length, 12);
+});
+
+function pngHeader(width, height) {
+    const bytes = Buffer.alloc(24);
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+    bytes.writeUInt32BE(13, 8);
+    bytes.write('IHDR', 12);
+    bytes.writeUInt32BE(width, 16);
+    bytes.writeUInt32BE(height, 20);
+    return bytes;
+}
+
+test('pack health check scans geometry and image headers without modifying files', t => {
+    const {checkPack} = require('../src/assets/health');
+    const f = fixture(t), result = f.repository.save(draft());
+    const folder = f.paths.textures('tacz:ai_awp'), asset = suffix => path.join(folder, result.id + suffix);
+    f.write(asset('.geo.json'), {'minecraft:geometry': [{description: {identifier: 'geometry.test'}, bones: []}]});
+    f.write(asset('.png'), pngHeader(32, 32));
+    f.write(asset('_hud.png'), pngHeader(96, 32));
+    f.write(asset('_icon.png'), pngHeader(32, 32));
+    const files = [result.filename, ...fs.readdirSync(folder).map(name => path.join(folder, name))];
+    const before = files.map(filename => fs.readFileSync(filename));
+    const report = checkPack(fs, f.paths);
+    assert.equal(report.files, 1);
+    assert.equal(report.skins, 1);
+    assert.deepEqual(report.issues, []);
+    files.forEach((filename, i) => assert.deepEqual(fs.readFileSync(filename), before[i]));
+    assert.equal(fs.existsSync(path.join(f.paths.pack, 'mcpskins_manager.json')), false);
+});
+
+test('pack health reports duplicate IDs, broken registries, bad geometry and wrong image dimensions', t => {
+    const {checkPack} = require('../src/assets/health');
+    const f = fixture(t), result = f.repository.save(draft());
+    const data = readJSON(fs, result.filename);
+    data.skins.push({...data.skins[0]});
+    f.write(result.filename, data);
+    f.write(path.join(f.paths.registryDirectory, 'broken_skins.json'), '{broken');
+    const folder = f.paths.textures('tacz:ai_awp');
+    f.write(path.join(folder, result.id + '.geo.json'), {invalid: true});
+    f.write(path.join(folder, result.id + '_hud.png'), pngHeader(32, 32));
+    f.write(path.join(folder, result.id + '_icon.png'), pngHeader(64, 32));
+    const report = checkPack(fs, f.paths);
+    for (const pattern of [/Duplicate skin ID/, /Unable to read/, /Invalid geometry/, /Skin texture is missing/, /HUD aspect ratio should be 3:1/, /Icon aspect ratio should be 1:1/]) {
+        assert.ok(report.issues.some(issue => pattern.test(issue.message)), pattern);
+    }
+    assert.ok(report.issues.find(issue => /Duplicate/.test(issue.message)).rowKey);
+});
+
+test('health check treats optional images as warnings and reports corrupt PNGs and missing directories', t => {
+    const {checkPack} = require('../src/assets/health');
+    const f = fixture(t);
+    assert.match(checkPack(fs, f.paths).issues[0].message, /directory is missing/);
+    const result = f.repository.save(draft());
+    f.write(path.join(f.paths.textures('tacz:ai_awp'), result.id + '.png'), 'broken PNG');
+    const issues = checkPack(fs, f.paths).issues;
+    assert.ok(issues.some(issue => issue.severity === 'error' && /PNG header/.test(issue.message)));
+    assert.ok(issues.some(issue => issue.severity === 'warning' && /HUD.*optional/.test(issue.message)));
+    assert.ok(issues.some(issue => issue.severity === 'warning' && /Icon.*optional/.test(issue.message)));
+});
+
+test('status metadata uses portable pack-relative IDs and preserves other metadata and registry fields', t => {
+    const {saveStatuses, rowStatus, statusKey} = require('../src/domain/status');
+    const f = fixture(t);
+    f.repository.save(draft());
+    const row = f.repository.discover().rows[0], registry = fs.readFileSync(row.filename, 'utf8');
+    const metadataFile = path.join(f.paths.pack, 'mcpskins_manager.json');
+    f.write(metadataFile, {title: 'Pack title', author: 'Author', future: {keep: true}, skin_statuses: {other: 'planned'}});
+    let metadata = saveStatuses(fs, f.paths, [row], 'wip');
+    assert.equal(rowStatus(metadata, f.paths, row).label, 'WIP');
+    assert.equal(metadata.author, 'Author');
+    assert.deepEqual(metadata.future, {keep: true});
+    assert.equal(metadata.skin_statuses.other, 'planned');
+    const moved = new PackPaths(path, path.join(f.root, 'moved'), 'Example', 'example');
+    const movedRow = {...row, filename: path.join(moved.registryDirectory, path.basename(row.filename))};
+    assert.equal(statusKey(moved, movedRow), statusKey(f.paths, row));
+    assert.equal(rowStatus(metadata, moved, movedRow).label, 'WIP');
+    metadata = saveStatuses(fs, f.paths, [row], null);
+    assert.equal(rowStatus(metadata, f.paths, row), null);
+    assert.equal(fs.readFileSync(row.filename, 'utf8'), registry);
+    f.write(metadataFile, {title: 'Keep', skin_statuses: 'invalid'});
+    assert.throws(() => saveStatuses(fs, f.paths, [row], 'complete'), /JSON object/);
+    assert.equal(readJSON(fs, metadataFile).skin_statuses, 'invalid');
+});

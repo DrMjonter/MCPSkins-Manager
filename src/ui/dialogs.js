@@ -12,32 +12,76 @@ function confirmDiscard() {
     }, result => resolve(result === 0)));
 }
 
-function packDialog(initial, readPack, apply) {
+function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {}) {
+    let applying = false;
+    const submit = (values, connection) => {
+        if (applying) return;
+        applying = true;
+        return Promise.resolve(apply(values, connection)).then(ok => { if (ok) dialog.hide(); })
+            .catch(error => message('Pack not applied', error.message)).finally(() => { applying = false; });
+    };
     const dialog = new Dialog('mcpskins_pack', {
-        title: 'MCPSkins Pack', width: 600,
+        title: 'MCPSkins Pack', width: 780,
+        part_order: ['form', 'component', 'lines'],
+        component: recentPacksComponent(recents, entry => {
+            currentDirectory = entry.directory;
+            currentAuthor = entry.author || '';
+            connection = null;
+            dialog.setFormValues({pack_directory: entry.directory, pack_namespace: entry.namespace, pack_author: currentAuthor});
+            return submit({pack_directory: entry.directory, pack_namespace: entry.namespace}, null);
+        }),
         form: {
             pack_directory: {label: 'Pack Directory', type: 'folder', value: initial.directory},
-            pack_namespace: {label: 'Pack Namespace', type: 'text', value: initial.namespace}
+            pack_namespace: {label: 'Pack Namespace', type: 'text', value: initial.namespace},
+            pack_author: {label: 'Author', type: 'text', value: initial.author || '', description: 'Saved automatically inside the selected pack.'}
         },
         onFormChange(values) {
-            if (!values.pack_directory || values.pack_directory === currentDirectory) return;
-            currentDirectory = values.pack_directory;
+            if (!values.pack_directory) return;
+            if (values.pack_directory !== currentDirectory) {
+                currentDirectory = values.pack_directory;
+                try {
+                    connection = readPack(currentDirectory);
+                    currentAuthor = connection.author || '';
+                    dialog.setFormValues({pack_namespace: connection.settings.pack_namespace, pack_author: currentAuthor});
+                    if (connection.warning) message('Pack settings', connection.warning + '\nUsing the example namespace default.');
+                } catch (error) { connection = null; message('Could not connect', error.message); }
+                return;
+            }
+            if (typeof values.pack_author !== 'string' || values.pack_author === currentAuthor) return;
+            currentAuthor = values.pack_author;
             try {
-                connection = readPack(currentDirectory);
-                dialog.setFormValues({pack_namespace: connection.settings.pack_namespace});
-                if (connection.warning) message('Pack settings', connection.warning + '\nUsing the example namespace default.');
-            } catch (error) { connection = null; message('Could not connect', error.message); }
+                const author = saveAuthor(currentDirectory, currentAuthor, connection);
+                for (const entry of recents) if (entry.directory === currentDirectory) entry.author = author;
+            } catch (error) { message('Author not saved', error.message); }
         },
         onConfirm(values) {
             // Returning false keeps the dialog open while the controller resolves dirty edits.
-            Promise.resolve(apply(values, connection)).then(ok => { if (ok) dialog.hide(); }).catch(error => message('Pack not applied', error.message));
+            submit(values, connection);
             return false;
         }
     });
     let currentDirectory = initial.directory;
+    let currentAuthor = initial.author || '';
     let connection = null;
     dialog.show();
     return dialog;
+}
+
+function recentPacksComponent(entries, select) {
+    return {
+        data() { return {entries}; },
+        methods: {select(entry) { return select(entry); }},
+        template: `<section class="mcpskins-recent-packs">
+            <h3>Recent Packs</h3>
+            <div v-if="entries.length" class="mcpskins-recent-scroll"><table>
+                <thead><tr><th>Name</th><th>Author</th><th>Path</th></tr></thead>
+                <tbody><tr v-for="entry in entries" :key="entry.directory" tabindex="0" @click="select(entry)" @keydown.enter.prevent="select(entry)" @keydown.space.prevent="select(entry)" :title="'Open ' + entry.directory">
+                    <td>{{entry.title}}</td><td>{{entry.author || 'Not specified'}}</td><td class="mcpskins-recent-path">{{entry.directory}}</td>
+                </tr></tbody>
+            </table></div>
+            <p v-else class="mcpskins-muted">Selected packs will appear here.</p>
+        </section>`
+    };
 }
 
 function colorDialog(color, apply) {
@@ -72,4 +116,4 @@ function namePrefixDialog(weapon, accept, cancel) {
     return dialog;
 }
 
-module.exports = {message, confirmDiscard, packDialog, colorDialog, namePrefixDialog};
+module.exports = {recentPacksComponent, message, confirmDiscard, packDialog, colorDialog, namePrefixDialog};

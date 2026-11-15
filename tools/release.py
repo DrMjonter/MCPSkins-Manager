@@ -69,7 +69,7 @@ def release():
     (output / "SHA256SUMS.txt").write_text(external_sums, encoding="utf-8", newline="\n")
     notes = f"""# MCPSkins Manager v{version}
 
-Add, edit, and browse MCPSkins in Blockbench desktop **5.2.2 or newer**.
+Add, edit, and browse MCPSkins in Blockbench desktop **5.1.0 or newer**.
 
 Download `MCPSkins-Manager-v{version}.zip` and extract it, or download the standalone `{PLUGIN}`. In Blockbench, open **File → Plugins → Load Plugin from File** and select `{PLUGIN}`. Keep that filename unchanged. No Python, Node, or separate dependencies are needed to use the plugin.
 

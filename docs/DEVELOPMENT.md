@@ -43,3 +43,9 @@ Upload the ZIP and/or the standalone `mcpskins_asset_manager.js` from the versio
 ## Desktop acceptance check
 
 Automated tests cover registry compatibility and simulated plugin interactions. Before publishing a release, check the installed desktop UI with a test pack: start-screen launch; pack selection; gun and melee editing; custom name prompts and overrides; cancellation with unsaved edits; opening single- and multi-geometry models; normal/specular imports; painting and saving; plugin reload with a draft; and window closing with unsaved model and registry edits.
+
+## Blockbench compatibility
+
+The minimum supported desktop version is 5.1.0. API review used the official `v5.1.0` tagged source for plugin-scoped native modules, filesystem methods, dialogs, panels, texture imports, codec events, Undo texture ordering, and start-screen sections. A feature-detected adapter uses `addStartScreenSection` in 5.1 and `StartScreen.addSection` in 5.2. Blockbench 5.0 lacks the plugin `shell` module used by Open File and Open Folder, so it is outside the supported range.
+
+The tagged sources are available at https://github.com/JannisX11/blockbench/tree/v5.1.0 and https://github.com/JannisX11/blockbench/blob/v5.0.0/js/native_apis.ts. Automated tests exercise both start-screen API shapes and use the installed 5.2.2 Vue runtime. This API review is not a full desktop acceptance run on 5.1.0; perform the desktop acceptance check above on that version before publishing a release.
