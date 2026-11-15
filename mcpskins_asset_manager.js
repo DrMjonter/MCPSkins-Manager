@@ -1403,27 +1403,49 @@ module.exports = {checkPack};
 },
 "src/ui/keyboard.js": function(module, exports, require) {
 'use strict';
-const SHORTCUTS = [
-    ['Up / Down', 'Previous / next visible skin'],
-    ['Home / End', 'First / last visible skin'],
-    ['Page Up / Page Down', 'Move one visible page'],
-    ['Shift + navigation', 'Extend the selected range'],
-    ['Ctrl/Cmd + navigation', 'Move focus without changing selection'],
-    ['Ctrl/Cmd + A', 'Select all skins in the pack, including filtered-out skins (list only)'],
-    ['Enter or Ctrl/Cmd + Enter', 'Open the focused skin model (list only)'],
-    ['Ctrl/Cmd + D', 'Duplicate the selected skin (outside text fields)'],
-    ['Ctrl/Cmd + F', 'Focus skin search'],
-    ['Ctrl/Cmd + S', 'Save skin metadata'],
-    ['Ctrl/Cmd + Shift + N', 'New Skin'],
-    ['Ctrl/Cmd + Shift + O', 'Select Pack'],
-    ['Ctrl/Cmd + Shift + R', 'Refresh Files'],
-    ['Ctrl/Cmd + Shift + H', 'Pack Health Check'],
-    ['Escape in search', 'Clear search'],
-    ['Down in search', 'Move into the skin list'],
-    ['? in the list', 'Show these shortcuts']
+const SHORTCUT_GROUPS = [
+    {title: 'List Navigation and Selection', items: [
+        ['Up / Down', 'Previous / next visible skin'],
+        ['Home / End', 'First / last visible skin'],
+        ['Page Up / Page Down', 'Move one visible page'],
+        ['Shift + navigation', 'Extend the selected range'],
+        ['Ctrl/Cmd + navigation', 'Move focus without changing selection'],
+        ['Ctrl/Cmd + A', 'Select all skins in the pack, including filtered-out skins (list only)']
+    ]},
+    {title: 'Skin Editing and Models', items: [
+        ['Ctrl/Cmd + Shift + N', 'New Skin'],
+        ['Ctrl/Cmd + D', 'Duplicate one selected skin (outside text fields)'],
+        ['Ctrl/Cmd + S', 'Save skin metadata, or the pack title while editing it'],
+        ['Enter or Ctrl/Cmd + Enter', 'Open the focused skin model (list only)']
+    ]},
+    {title: 'Search', items: [
+        ['Ctrl/Cmd + F', 'Focus skin search'],
+        ['Escape in search', 'Clear search'],
+        ['Down in search', 'Move into the skin list']
+    ]},
+    {title: 'Pack Management', items: [
+        ['Ctrl/Cmd + Shift + O', 'Select Pack'],
+        ['Ctrl/Cmd + Shift + R', 'Refresh Files'],
+        ['Ctrl/Cmd + Shift + H', 'Pack Health Check']
+    ]},
+    {title: 'Help', items: [
+        ['? in the list', 'Show these shortcuts']
+    ]}
 ];
+const SHORTCUTS = SHORTCUT_GROUPS.flatMap(group => group.items);
 function shortcutComponent() {
-    return {data() { return {shortcuts: SHORTCUTS}; }, template: `<div class="mcpskins-shortcuts"><p>Shortcuts apply while focus is inside MCPSkins Manager. List navigation follows the current search, filters, and sorting. Text fields retain their normal editing keys.</p><table><tbody><tr v-for="item in shortcuts" :key="item[0]"><td><kbd>{{item[0]}}</kbd></td><td>{{item[1]}}</td></tr></tbody></table></div>`};
+    return {
+        data() { return {groups: SHORTCUT_GROUPS}; },
+        template: `<div class="mcpskins-shortcuts">
+            <h2>Keyboard Shortcuts</h2>
+            <section v-for="group in groups" :key="group.title">
+                <h3>{{group.title}}</h3>
+                <table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+                    <tr v-for="item in group.items" :key="item[0]"><td><kbd>{{item[0]}}</kbd></td><td>{{item[1]}}</td></tr>
+                </tbody></table>
+            </section>
+        </div>`
+    };
 }
 class ManagerKeyboard {
     constructor(controller) { this.controller = controller; this.focusedKey = ''; }
@@ -2167,6 +2189,11 @@ module.exports = `
 .mcpskins-recent-packs tbody tr {cursor:pointer}
 .mcpskins-recent-packs tbody tr:hover,.mcpskins-recent-packs tbody tr:focus {background:var(--color-selected);outline:none}
 .mcpskins-recent-path {font-size:11px;color:var(--color-subtle_text);width:50%}
+.mcpskins-shortcuts {max-height:65vh;overflow:auto}
+.mcpskins-shortcuts section {margin:18px 0 4px}
+.mcpskins-shortcuts h3 {font-size:14px;font-weight:600;margin:0 0 7px}
+.mcpskins-shortcuts th {text-align:left;padding:6px 8px;color:var(--color-subtle_text);font-size:12px}
+.mcpskins-shortcuts td:first-child,.mcpskins-shortcuts th:first-child {width:45%}
 .mcpskins-shortcuts table {border-collapse:collapse;width:100%;font-size:13px}
 .mcpskins-shortcuts td {padding:6px 8px;border-bottom:1px solid var(--color-border)}
 .mcpskins-shortcuts kbd {white-space:nowrap;font:inherit;font-weight:600}

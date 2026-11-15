@@ -9,6 +9,11 @@ module.exports = `
 .mcpskins-recent-packs tbody tr {cursor:pointer}
 .mcpskins-recent-packs tbody tr:hover,.mcpskins-recent-packs tbody tr:focus {background:var(--color-selected);outline:none}
 .mcpskins-recent-path {font-size:11px;color:var(--color-subtle_text);width:50%}
+.mcpskins-shortcuts {max-height:65vh;overflow:auto}
+.mcpskins-shortcuts section {margin:18px 0 4px}
+.mcpskins-shortcuts h3 {font-size:14px;font-weight:600;margin:0 0 7px}
+.mcpskins-shortcuts th {text-align:left;padding:6px 8px;color:var(--color-subtle_text);font-size:12px}
+.mcpskins-shortcuts td:first-child,.mcpskins-shortcuts th:first-child {width:45%}
 .mcpskins-shortcuts table {border-collapse:collapse;width:100%;font-size:13px}
 .mcpskins-shortcuts td {padding:6px 8px;border-bottom:1px solid var(--color-border)}
 .mcpskins-shortcuts kbd {white-space:nowrap;font:inherit;font-weight:600}
