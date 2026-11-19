@@ -2,20 +2,31 @@
 
 ## 1.2.0
 
-- Add Save and Continue to unsaved-edit prompts, preserving edits when saving fails or is canceled and continuing with fresh saved entries.
+### Major Changes
 
-- Allow Add Level before selecting variants; choosing a level reward adds its skin to the variant list automatically.
+- **Gun pack scanning:** Find weapons and attachments in TaCZ folders and ZIP packs, plus melee weapons, throwables, and consumables from installed LesRaisins JARs. Discovered IDs appear in the weapon dropdown.
+- **Automatic asset preparation:** Open Model finds the source geometry and creates skin-specific copies of missing textures, normal/specular maps, icons, and available HUD/LOD textures. Existing skin files are kept.
+- **LesRaisins editing:** Prepare geometry, UV textures, icons, and available maps for melee weapons, throwables, and consumables. Geometry is a Blockbench editing reference; MCPSkins currently applies texture and icon changes to these items.
+- **Variants and leveling:** Group skins as variants and set level rewards using kill, headshot, and player-kill goals. Renaming a skin updates its variant links, and duplicates start with empty variant and level lists.
+- **More skin fields:** Add skin authors, subtitles, and Limited Edition badges. Skin authors stay separate from the pack author, with support for registry-file author defaults.
+- **Rarity manager:** Create custom tiers or override built-in ones. Edit names, colors, order, translation keys, fusion costs, and fusion targets, including weighted targets. Rarity dropdowns, sorting, and default colors use the selected pack's definitions.
+- **Live pack health:** The header icon updates automatically as saved files change: red for errors, yellow for warnings, and green when there are no active issues. Ignore individual findings per pack and restore them later.
+- **Update checker:** Check GitHub at startup and show a clickable icon when a newer stable release is available.
 
-- Add independent skin-author, subtitle, and Limited fields, including shared-field bulk editing and search by author/subtitle.
-- Add a same-file variant picker and ordered level editor for kills, headshots, and player kills, with safe validation and health-check diagnostics.
-- Preserve pack-author separation and registry-file author defaults; keep variant links consistent when a skin ID changes and start duplicates without shared links.
+### Quality of Life
 
-- Discover installed TaCZ gun and attachment definitions from folders and ZIP packs, including cross-pack resource references.
-- Add a configurable TaCZ directory, cached discovery, Rescan Gun Packs, and remembered source choices for conflicting resources.
-- Populate weapon suggestions from installed packs while preserving default display names and custom inputs.
-- Prepare independent skin geometry at the documented MCPSkins override path and copy missing default textures, normal/specular maps, icons, HUD variants, and LOD textures.
-- Remember model locations in pack metadata, preserve existing skin files, and include resolved geometry in duplication and health checks.
-- Support attachment registries and other base-item keys, discover arbitrary registry JSON filenames, and keep the manual asset workflow available.
+- Split the Asset Inspector into **Data**, **Skin**, and a collapsible **Advanced** section, with clearer headings and subtle field separators.
+- Add hover help beside field titles and red asterisks for required fields.
+- Hide the fusion-weight input until **Override Fusion Weight** is checked.
+- Add **Save and Continue** to unsaved-edit prompts so you can save before switching skins or packs.
+- Let **Add Level** create a row before variants are selected. Choosing a reward adds that skin to the variant list automatically.
+- Mark variants with a purple diamond in the list. Hover it to see their parent skin.
+- Move Health Check beside the pack title and Refresh beside search as small icon buttons.
+- Move Rescan into **Gun Packs...** and show a completion summary by item type, including custom rarities.
+- Make **Open Folder** create the asset folder when it doesn't exist.
+- Remember source choices when packs provide conflicting assets, and keep prepared assets usable when their source pack is unavailable.
+- Support different registry filenames and all supported item families while keeping the manual asset workflow available.
+- Show the plugin version in its title and update the README for the current workflow.
 
 ## 1.1.0
 
