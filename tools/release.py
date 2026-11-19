@@ -28,7 +28,7 @@ def release():
         raise ValueError("The current version is missing from CHANGELOG.md")
 
     runpy.run_path(str(ROOT / "tools/build.py"), run_name="__main__")
-    payload = {name: (ROOT / name).read_bytes() for name in FILES}
+    payload = {name: (ROOT / name).read_text(encoding="utf-8").encode("utf-8") for name in FILES}
     plugin = payload[PLUGIN].decode("utf-8")
     if "Plugin.register('mcpskins_asset_manager'" not in plugin:
         raise ValueError("The plugin ID does not match its loadable filename")
