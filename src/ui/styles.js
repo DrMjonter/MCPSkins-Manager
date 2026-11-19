@@ -1,5 +1,37 @@
 'use strict';
 module.exports = `
+.mcpskins-rarity-manager {font-size:13px;container-type:inline-size;max-height:72vh;overflow:auto;padding:0 3px 6px}
+.mcpskins-rarity-layout {display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,1fr);gap:18px}
+.mcpskins-rarity-browser,.mcpskins-rarity-inspector {min-width:0}
+.mcpskins-rarity-muted {color:var(--color-subtle_text);font-size:11px}
+.mcpskins-rarity-manager p {margin:6px 0 10px;overflow-wrap:anywhere}
+.mcpskins-rarity-toolbar {display:flex;gap:6px;align-items:center;margin-bottom:8px}
+.mcpskins-rarity-toolbar input {flex:1;min-width:60px}
+.mcpskins-rarity-manager button {min-width:0;white-space:nowrap}
+.mcpskins-rarity-manager input:not([type=checkbox]),.mcpskins-rarity-manager select {box-sizing:border-box;min-height:28px;max-width:100%;font:inherit;color:var(--color-text);background:var(--color-dark);border:1px solid var(--color-border);border-radius:3px;padding:4px 7px}
+.mcpskins-rarity-scroll {overflow:auto;max-height:55vh;border:1px solid var(--color-border);border-radius:4px}
+.mcpskins-rarity-manager table {border-collapse:collapse;width:100%;text-align:left}
+.mcpskins-rarity-manager th,.mcpskins-rarity-manager td {padding:8px;border-bottom:1px solid var(--color-border);overflow-wrap:anywhere}
+.mcpskins-rarity-manager th {position:sticky;top:0;background:var(--color-back);z-index:1}
+.mcpskins-rarity-manager tbody tr {cursor:pointer}
+.mcpskins-rarity-manager tbody tr:hover {background:var(--color-ui)}
+.mcpskins-rarity-manager tbody tr.selected {background:var(--color-selected);box-shadow:inset 3px 0 var(--color-accent)}
+.mcpskins-rarity-manager tbody tr:focus-visible {outline:1px solid var(--color-accent);outline-offset:-1px}
+.mcpskins-rarity-inspector {border-left:1px solid var(--color-border);padding-left:18px}
+.mcpskins-rarity-inspector h3 {font-size:14px;font-weight:700;margin:0 0 10px}
+.mcpskins-rarity-inspector form,.mcpskins-rarity-inspector label {display:flex;flex-direction:column;gap:5px;min-width:0}
+.mcpskins-rarity-inspector form {gap:12px}
+.mcpskins-rarity-inspector label > input:not([type=checkbox]),.mcpskins-rarity-inspector label > select {width:100%}
+.mcpskins-rarity-inspector input[readonly] {opacity:.6}
+.mcpskins-rarity-inspector .mcpskins-rarity-check {flex-direction:row;align-items:center;gap:7px}
+.mcpskins-rarity-manager input[type=checkbox] {position:static;display:inline-flex;align-items:center;justify-content:center;flex:0 0 24px;width:24px;height:24px;min-width:24px;min-height:24px;margin:0;padding:0;vertical-align:middle;background:transparent;border:0;transform:none;line-height:1}
+.mcpskins-rarity-manager input[type=checkbox]::before {display:block;line-height:1}
+.mcpskins-rarity-color,.mcpskins-rarity-actions {display:flex;align-items:center;gap:6px}
+.mcpskins-rarity-color input[type=color] {width:32px;min-width:32px;height:30px;padding:0}
+.mcpskins-rarity-color input:not([type=color]) {flex:1;min-width:50px}
+.mcpskins-rarity-target {display:grid;grid-template-columns:minmax(100px,1fr) 70px auto;gap:6px;align-items:end;margin-bottom:8px}
+.mcpskins-rarity-targets {border:1px solid var(--color-border);padding:8px;border-radius:4px}
+@container (max-width:650px) {.mcpskins-rarity-layout {grid-template-columns:1fr}.mcpskins-rarity-inspector {border-left:0;border-top:1px solid var(--color-border);padding:12px 0 0}}
 .mcpskins-recent-packs {margin:18px 0 0}
 .mcpskins-recent-packs h3 {font-size:14px;margin:0 0 8px}
 .mcpskins-recent-scroll {max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:3px}
@@ -24,6 +56,7 @@ module.exports = `
 .mcpskins-health-error {color:#e05a5a}
 .mcpskins-health-warning {color:#d4a537}
 .mcpskins-status-flag {display:inline-block;width:11px;height:13px;margin-right:7px;vertical-align:-2px;clip-path:polygon(0 0,100% 0,100% 65%,15% 65%,15% 100%,0 100%);background:currentColor}
+.mcpskins-variant-flag {width:10px;height:10px;margin-right:0;margin-left:7px;vertical-align:0;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);color:#a875dc}
 .mcpskins-status-unset {color:var(--mc-muted);opacity:.25}
 #panel_mcpskins_asset_manager {padding:0;overflow:hidden;min-width:240px}
 #panel_mcpskins_asset_manager .panel_vue_wrapper {height:100%;min-height:0;overflow:auto}
@@ -38,6 +71,9 @@ module.exports = `
 .mcpskins button,.mcpskins input:not([type=checkbox]),.mcpskins select,.mcpskins textarea {font:inherit;color:var(--mc-text);border:1px solid var(--mc-border);border-radius:3px;background:var(--mc-field);min-height:28px;padding:4px 7px;max-width:100%}
 .mcpskins button {cursor:pointer;white-space:nowrap}
 .mcpskins button:hover {border-color:var(--mc-accent)}
+.mcpskins-brand {display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.mcpskins .mcpskins-brand > .mcpskins-update-button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 24px;width:24px;min-width:24px;max-width:24px;height:24px;min-height:24px;max-height:24px;padding:0;color:var(--mc-accent);background:transparent}
+.mcpskins-update-button svg {display:block;flex-shrink:0}
 .mcpskins input:focus,.mcpskins textarea:focus,.mcpskins select:focus,.mcpskins button:focus-visible {outline:1px solid var(--mc-accent);outline-offset:1px}
 .mcpskins input[readonly],.mcpskins :disabled {opacity:.6}
 .mcpskins textarea {resize:vertical;min-height:65px}
@@ -50,17 +86,27 @@ module.exports = `
 .mcpskins .mcpskins-pack-title:hover {border-color:var(--mc-border)}
 .mcpskins .mcpskins-pack-title-input {width:200px;min-width:70px}
 .mcpskins-pack-heading > .mcpskins-secondary {flex-shrink:0}
+.mcpskins .mcpskins-pack-heading > .mcpskins-health-button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;max-height:28px;padding:0}
+.mcpskins-health-button svg {display:block;flex-shrink:0}
+.mcpskins .mcpskins-health-button[data-health="error"] {color:#e05a5a}
+.mcpskins .mcpskins-health-button[data-health="warning"] {color:#d4a537}
+.mcpskins .mcpskins-health-button[data-health="good"] {color:#3bbd77}
 .mcpskins-header strong {font-size:16px}
 .mcpskins-muted,.mcpskins-path {color:var(--mc-muted);font-size:11px}
 .mcpskins-path {overflow-wrap:anywhere;margin:8px 0}
+.mcpskins-gunpacks {display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0}
+.mcpskins-gunpacks > span {flex:1;min-width:140px;overflow-wrap:anywhere}
+.mcpskins-gunpacks button {font-size:11px;min-height:25px}
 .mcpskins-filters {display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
 .mcpskins-filters input {flex:1;min-width:70px;width:100%}
 .mcpskins-filters select {max-width:130px}
+.mcpskins .mcpskins-filters > .mcpskins-refresh-button {display:inline-flex;align-items:center;justify-content:center;align-self:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;max-height:28px;padding:0}
+.mcpskins-refresh-button svg {display:block;flex-shrink:0}
 .mcpskins-table-wrap {overflow:auto;border:1px solid var(--mc-border);border-radius:3px;max-height:300px;min-height:100px}
 .mcpskins-table {border-collapse:collapse;width:100%;text-align:left;white-space:nowrap}
 .mcpskins-table th {position:sticky;top:0;background:var(--mc-panel);z-index:1;text-align:left}
 .mcpskins-table th button {border:0;background:transparent;font-weight:bold;width:100%;text-align:left}
-.mcpskins-table td {padding:6px 8px;border-bottom:1px solid var(--mc-border);max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.mcpskins-table td {padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.07);max-width:260px;overflow:hidden;text-overflow:ellipsis}
 .mcpskins-table tbody tr {cursor:pointer;user-select:none}
 .mcpskins-table tr.selected {background:var(--mc-selected);box-shadow:inset 3px 0 var(--mc-accent)}
 .mcpskins-table tr:focus-visible {outline:1px solid var(--mc-accent);outline-offset:-2px}
@@ -69,8 +115,33 @@ module.exports = `
 .mcpskins-inspector {border-top:1px solid var(--mc-border);padding-top:10px;margin-top:10px;min-width:0}
 .mcpskins-inspector h3 {font-size:14px;margin:0 0 8px;font-weight:600}
 .mcpskins-dirty {font-size:11px;color:var(--mc-accent);margin-left:6px}
-.mcpskins-fields {display:flex;flex-direction:column;gap:9px;min-width:0}
+.mcpskins-fields {display:flex;flex-direction:column;gap:16px;min-width:0}
+.mcpskins-field-group {display:flex;flex-direction:column;gap:10px;min-width:0}
+.mcpskins-field-group > label + label,.mcpskins-field-group > .mcpskins-weapon-field + label,.mcpskins-field-group > label + .mcpskins-weapon-field {border-top:1px solid rgba(108,146,196,.12);padding-top:10px}
+.mcpskins .mcpskins-field-heading {font-size:13px;font-weight:700;margin:0;padding:8px 10px;border:1px solid var(--mc-border);border-radius:4px;background:linear-gradient(rgba(108,146,196,.10),rgba(108,146,196,.10)),var(--mc-panel)}
+.mcpskins-advanced {border:1px solid var(--mc-border);border-radius:6px;overflow:hidden}
+.mcpskins .mcpskins-advanced > summary {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;list-style:none;background:rgba(255,255,255,.07)}
+.mcpskins-advanced > summary::-webkit-details-marker {display:none}
+.mcpskins-advanced > summary::after {content:'';width:8px;height:8px;flex-shrink:0;margin:0 3px 4px 0;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg)}
+.mcpskins-advanced[open] > summary::after {transform:rotate(225deg);margin-top:4px;margin-bottom:0}
+.mcpskins-advanced > summary:hover {background:rgba(255,255,255,.11)}
+.mcpskins-advanced > summary:focus-visible {outline:1px solid var(--mc-accent);outline-offset:-2px}
+.mcpskins-advanced > .mcpskins-field-group {padding:12px}
 .mcpskins-fields label {display:flex;flex-direction:column;gap:4px}
+.mcpskins-required {color:#e05a5a;font-weight:700}
+.mcpskins-field-help {display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;flex:0 0 auto;width:14px;height:14px;margin-left:3px;border:1px solid var(--mc-muted);border-radius:50%;color:var(--mc-muted);font-size:10px;font-weight:600;line-height:1;cursor:help}
+.mcpskins-field-help:hover {color:var(--mc-text);border-color:var(--mc-text)}
+.mcpskins-field-help:focus-visible {outline:1px solid var(--mc-accent);outline-offset:2px}
+.mcpskins-variants {border:1px solid var(--mc-border);border-radius:6px;padding:6px 9px}
+.mcpskins-variants > summary {font-weight:600}
+.mcpskins-variant-list {display:flex;flex-direction:column;gap:7px;max-height:190px;overflow:auto;padding:6px 0 10px}
+.mcpskins-variant-list small {display:block;overflow-wrap:anywhere}
+.mcpskins-variants h4 {margin:14px 0 6px;font-weight:600}
+.mcpskins-level {border-top:1px solid var(--mc-border);padding:9px 0;display:flex;flex-direction:column;gap:7px}
+.mcpskins-level-heading {display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
+.mcpskins-level-heading > div {display:flex;gap:4px}
+.mcpskins-level-goals {display:grid;grid-template-columns:repeat(auto-fit,minmax(85px,1fr));gap:6px}
+.mcpskins-level-goals input {width:100%;min-width:0}
 .mcpskins-weapon-field {display:flex;flex-direction:column;gap:4px}
 .mcpskins-weapon-picker {position:relative;min-width:0}
 .mcpskins-weapon-input {display:flex;gap:4px;align-items:stretch}
@@ -102,6 +173,7 @@ module.exports = `
 .mcpskins-notice,.mcpskins-warnings {padding:7px;border-left:3px solid var(--mc-accent);overflow-wrap:anywhere;margin:8px 0}
 .mcpskins-theme {display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;border-top:1px solid var(--mc-border);margin-top:12px;padding-top:8px;font-size:11px;color:var(--mc-muted)}
 .mcpskins-theme label {display:flex;align-items:center;gap:8px}
+.mcpskins .mcpskins-variant-warning {border-left-color:#e05a5a;background:rgba(224,90,90,.07)}
 /* Frutiger Aero: sky glass, clear white surfaces, and glossy blue controls. */
 .mcpskins.mcpskins-aero {--color-back:#e8f5fc;--color-dark:#e1eff7;--color-text:#163c57;--color-subtle_text:#456a80;--color-border:#a5c7da;--color-button:#d6edf9;--color-ui:#e6f3fb;--color-selected:#b8def5;--color-accent:#087db9;--color-accent_text:#fff;color-scheme:light;background:radial-gradient(ellipse at 90% 0%,#ffffffd9,transparent 55%),linear-gradient(155deg,#effaff,#d8edf9);text-shadow:none}
 .mcpskins-aero .mcpskins-header {background:linear-gradient(180deg,#ffffffed,#d4ecfacf);border:1px solid #a5c7da;border-radius:9px;box-shadow:inset 0 1px #fff,0 2px 5px #22577a14;padding:9px 12px;margin-bottom:10px}

@@ -1,70 +1,84 @@
-# MCPSkins Manager for Blockbench
+# MCPSkins Manager v1.2.0
 
-Plugin for **Blockbench desktop 5.1.0 or newer**. Made by Mjonter.
-Intended to make skin creation and management a much less tedious and annoying process.
+A Blockbench plugin for creating and managing MCPSkins packs. Made to make skin creation a less tedious and annoying process, with less digging through folders and editing JSON by hand.
 
-## Load the plugin
+Made by **Mjonter**. Requires **Blockbench desktop 5.1.0 or newer**.
 
-1. In Blockbench, open **File → Plugins** and use **Load Plugin from File** to select `mcpskins_asset_manager.js` in this directory.
-2. Click **Open MCPSkins Manager** on Blockbench's start screen, or choose **File → MCPSkins Manager**. With a model selected, the File/Tools menu command opens the dockable panel. Drag its header to dock, resize, or float it using Blockbench's panel controls.
-3. Click **Select Pack**. Select your pack directory directly, for example `mcpskins/example`
-<img width="1250" height="1942" alt="Untitled-1" src="https://github.com/user-attachments/assets/ec405ac1-70f0-40de-8020-e9ad0d3f937f" />
+## Getting started
+
+1. Download `mcpskins_asset_manager.js` from [Releases](https://github.com/DrMjonter/MCPSkins-Manager/releases). If you downloaded the ZIP, extract it first.
+2. In Blockbench, go to **File > Plugins > Load Plugin from File** and select the `.js` file.
+3. Click **Open MCPSkins Manager** on the start screen, or open it from the **File** or **Tools** menu. You don't need a model open first.
+4. Click **Select Pack** and choose your pack folder, for example `mcpskins/my_pack`. Check that the namespace matches the folder containing your skin registries.
+
+<img width="1250" alt="MCPSkins Manager in Blockbench" src="https://github.com/user-attachments/assets/ec405ac1-70f0-40de-8020-e9ad0d3f937f" />
 
 
-## Duplicate and edit multiple skins
+## Making and editing skins
 
-Right-click an entry and choose **Duplicate Skin**. The editor suggests a unique copy name and ID. Adjust them, then click **Save Skin** to create the entry and copy its existing geometry, skin texture, normal/specular maps, HUD, and icon. Existing destination files are never overwritten. Save painted source textures in Blockbench first to include those changes in the copy.
+Select a skin from the list to edit it, or click **New Skin** to start one. The inspector is split into **Data**, **Skin**, and **Advanced**. Hover the little **?** icons if you're unsure what something does.
 
-Use **Ctrl-click** (or **Cmd-click**) to toggle individual entries, and **Shift-click** to select a range in the current filtered and sorted list. A regular click returns to one entry. With multiple skins selected, name, ID, weapon, and prefix controls are disabled. Change shared metadata and click **Save Selected Skins**; only the fields you change are applied, preserving each skin's other values. Different values are marked as mixed. **Discard Changes** resets the shared editor.
+- Search by name and filter by rarity or collection. Click column headers to sort the list.
+- Choose a discovered weapon ID, search the default TaCZ IDs, or type an ID from another pack.
+- Custom weapons can have a remembered name prefix. You can also override it for an individual skin.
+- Edit names, descriptions, collections, authors, subtitles, rarity colors, NEW and LIMITED badges, and unlock settings.
+- Group skins as **variants**, then add level rewards with kill, headshot, or player-kill goals.
 
-Missing HUD previews show a recommended **3:1** aspect ratio; missing icon previews show **1:1**.
+Right-click a skin and choose **Duplicate Skin** to make a copy. Adjust the suggested name and ID, then save it to copy the entry and its existing assets. Save any painting in Blockbench first so those changes are included.
 
-## Pack metadata
+For bulk edits, **Ctrl/Cmd-click** individual skins or **Shift-click** a range. Identity fields are disabled while editing multiple skins, and only the shared fields you change are applied.
 
-Click the pack title beside **Select Pack** to edit it. New packs display **Pack Name**. Press Enter or click outside the field to save automatically; Escape cancels the edit. A blank title returns to **Pack Name**.
+**Save Skin saves metadata. Save models and painted textures separately using Blockbench's save commands.** If you try to leave an unsaved skin, you can save and continue, discard the changes, or cancel.
 
-Metadata is stored inside the selected pack in `mcpskins_manager.json`, starting with a `title` field. It travels with the pack, is independent of skin drafts, and preserves additional metadata fields when the title changes.
+## Models and textures
 
-## Recent packs
+**Open Model** opens the skin's geometry and imports its texture, plus normal and specular maps when available. If the files are missing, the manager prepares skin-specific copies from the source assets. Existing skin files are kept, so reopening a model won't replace your painting.
 
-**Select Pack** shows the 12 most recently opened packs with **Name**, **Author**, and **Path**. Click an entry or focus it and press Enter to reopen it with its remembered namespace. History is saved locally in Blockbench. Folder selection remains available above the list.
+The manager looks for TaCZ gun packs in the instance's `tacz` folder and installed LesRaisins JARs in `mods`. Use **Gun Packs...** to change the TaCZ directory or run a rescan. The results show counts for guns, attachments, melee weapons, throwables, consumables, and custom rarities.
 
-Edit **Author** above Recent Packs; changes save automatically to the directory selected in the popup and update its recent entry.
+**Open Folder** takes you to the item's skin assets and creates the folder if it doesn't exist. The circular-arrow button beside search refreshes the skin list.
 
-Name uses the metadata `title`; Author uses the optional `author` field in the pack's `mcpskins_manager.json`. Packs without an author display **Not specified**. Metadata edits made through the manager update the remembered entry.
+## Rarities
 
-The collection dropdown beside rarity defaults to **All** and lists the selected pack's collections automatically. It works together with search and rarity filtering, and updates when skins are saved or files refreshed.
+Click **Rarities** to browse or create rarity tiers. You can edit their names, colors, ladder order, translation keys, fusion costs, and fusion targets, including weighted targets.
 
-## Status flags and pack health
+Editing a built-in tier saves an override inside your pack. Custom tiers are picked up by both rarity dropdowns, and the list changes when you switch packs.
 
-Right-click a skin and hover **Status** to choose **WIP** (yellow), **Planned** (red), or **Complete** (green), or clear its flag. If the clicked skin belongs to a multi-selection, the status applies to all selected skins. Flags save automatically in the pack's `mcpskins_manager.json` and do not change the skin registry schema.
+## Keeping your pack organized
 
-Click **Health Check** below the list to inspect saved registry files, duplicate IDs, registry filenames, required metadata, missing geometry/textures, geometry JSON, PNG headers, and HUD/icon aspect ratios. The report lists errors and warnings with **Select Skin** and **Reveal Registry** actions. Missing optional HUD/icon images are warnings; PNG checks inspect headers and dimensions rather than fully decoding images. The check does not repair or modify files, and does not include unsaved Blockbench model/texture edits or skin drafts.
+Click the pack name beside **Select Pack** to rename it. The Select Pack window also keeps a list of recent packs so you don't have to browse to the same folder every time.
 
-Click **Progress** to sort Planned, WIP, Complete, then unassigned skins; click again to reverse.
+Right-click an entry and use **Status** to mark it **Planned** (red), **WIP** (yellow), or **Complete** (green). You can apply a status to multiple selected skins and sort by the Progress column.
 
-## Keyboard shortcuts
+The small health button beside the pack name checks saved files automatically:
 
-Focus the manager to use its shortcuts. **Keyboard Shortcuts** beside the theme selector opens the full guide.
+- **Red:** errors need attention.
+- **Yellow:** warnings only.
+- **Green:** no active issues.
+
+Click it to open the report. Individual findings can be ignored, then restored later under **Ignored findings**. Pack titles, authors, progress flags, and ignored findings are stored in `mcpskins_manager.json` inside the pack.
+
+## Handy shortcuts
+
+Focus the manager to use these. Normal typing shortcuts still work in text fields.
 
 | Shortcut | Action |
 | --- | --- |
-| Up / Down | Previous / next visible skin |
-| Home / End | First / last visible skin |
-| Page Up / Page Down | Move one visible page |
-| Shift + navigation | Extend the selection |
-| Ctrl/Cmd + navigation | Move focus without changing selection |
-| Ctrl/Cmd + A | Select all pack skins, including filtered-out entries, while in the list |
-| Enter or Ctrl/Cmd + Enter | Open the focused skin model from the list |
-| Ctrl/Cmd + D | Duplicate one selected skin outside text fields |
-| Ctrl/Cmd + F | Focus search |
-| Ctrl/Cmd + S | Save skin metadata; saves the pack title while editing it |
+| Up / Down | Move through the skin list |
+| Shift + navigation | Extend your selection |
+| Ctrl/Cmd + A | Select all skins in the loaded pack, including ones hidden by filters |
+| Enter | Open the focused skin's model from the list |
+| Ctrl/Cmd + D | Duplicate a skin |
+| Ctrl/Cmd + S | Save skin metadata |
+| Ctrl/Cmd + F | Jump to search |
 | Ctrl/Cmd + Shift + N | New Skin |
-| Ctrl/Cmd + Shift + O | Select Pack |
-| Ctrl/Cmd + Shift + R | Refresh Files |
-| Ctrl/Cmd + Shift + H | Health Check |
-| Escape in search | Clear search |
-| Down in search | Move into the list |
-| ? in the list | Show the shortcut guide |
+| Ctrl/Cmd + Shift + R | Refresh the list |
+| ? | Open the full shortcut guide while in the list |
 
-Navigation follows the current filters and sort order. Ctrl/Cmd+A selects the entire loaded pack without clearing filters; the inspector shows how many selected skins are hidden. Unsaved-change prompts still apply. New and duplicate shortcuts focus the skin name for editing. Normal text-editing shortcuts remain available in inputs, and keys outside the manager retain Blockbench's normal behavior.
+The **Keyboard Shortcuts** button at the bottom opens the same guide.
+
+## More info
+
+The [MCPSkins wiki](https://github.com/json-nn/mcpskins/wiki) covers how the mod loads packs and what the different fields and assets do.
+
+Found a bug? [Open an issue](https://github.com/DrMjonter/MCPSkins-Manager/issues) and include what you were doing when it happened. Screenshots help.

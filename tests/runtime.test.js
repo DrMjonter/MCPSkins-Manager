@@ -332,7 +332,7 @@ test('canceling a directory switch keeps unsaved edits and leaves pack settings 
     controller.configure();
     const dialog = dialogs.at(-1);
     dialog.options.onConfirm({pack_directory: pack, pack_namespace: 'other'});
-    globals.prompt.callback(1);
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(dialog.visible, true);
     assert.equal(controller.manager.state.folder, 'Example');
@@ -408,7 +408,7 @@ test('canceling a selection transition preserves the draft and selected row', as
     controller.edit('label', 'Keep me');
     let applied = false;
     const transition = controller.transition(() => { applied = true; });
-    globals.prompt.callback(1);
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
     assert.equal(await transition, false);
     assert.equal(applied, false);
     assert.equal(controller.manager.state.draft.label, 'Keep me');
@@ -427,7 +427,7 @@ test('window close cancel retains draft; discard permits close', t => {
     assert.equal(globals.closed, undefined);
     assert.equal(controller.manager.state.dirty, true);
     controller.beforeUnload(event());
-    globals.prompt.callback(1);
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Discard'));
     assert.equal(globals.closed, 1);
     assert.equal(local.getItem('mcpskins_asset_manager.draft.v1'), null);
 });
@@ -651,7 +651,7 @@ test('generated plugin registers, loads, cleans up and reloads without leaking h
         moveToFront() {}
         delete() { counts.panels--; }
     }
-    const context = {console, setTimeout, clearTimeout, requireNativeModule: name => require(name),
+    const context = {console, setTimeout, clearTimeout, setInterval, clearInterval, requireNativeModule: name => require(name),
         localStorage: storage(), Plugin: {register(id, options) { assert.equal(id, 'mcpskins_asset_manager'); plugin = options; }},
         Action, Panel, Toolbar: class { delete() {} }, MenuBar: {addAction(_action, location) { menus.push(location); }},
         document: environment.document, Vue: environment.Vue, StartScreen: environment.startScreen,
@@ -907,7 +907,7 @@ test('canceling a dirty multi-selection transition retains the original selected
     manager.selectRows(rows.slice(0, 2));
     controller.edit('description', 'Keep this draft');
     const pending = controller.select(rows[2], {ctrlKey: true});
-    globals.prompt.callback(1);
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
     await pending;
     assert.deepEqual(manager.state.selectedKeys, rows.slice(0, 2).map(row => row.key));
     assert.equal(manager.state.draft.description, 'Keep this draft');
@@ -1047,7 +1047,7 @@ test('recent pack selection respects unsaved edits and handles missing directori
     const picker = dialogs.at(-1), entry = picker.options.component.data().entries.find(entry => entry.directory === other);
     controller.edit('description', 'Unsaved');
     const pending = picker.options.component.methods.select(entry);
-    globals.prompt.callback(1);
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
     await pending;
     assert.equal(manager.state.folder, 'Example');
     assert.equal(manager.state.draft.description, 'Unsaved');
@@ -1156,7 +1156,7 @@ test('health report opens in a native dialog and issue selection respects unsave
     assert.equal(report.skins, 4);
     const issue = report.issues.find(issue => issue.rowKey && issue.skinId !== rows[0].skin.id);
     const pending = dialog.options.component.methods.select(issue);
-    globals.prompt.callback(1);
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
     await pending;
     assert.equal(manager.state.draft.description, 'Keep draft');
     assert.equal(dialog.visible, true);
@@ -1307,7 +1307,7 @@ test('keyboard navigation cancellation retains draft, selection, and focus', asy
     keys.nodes[0].focus();
     controller.edit('description', 'Keep draft');
     keys.press('ArrowDown', keys.nodes[0]);
-    globals.prompt.callback(1);
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(manager.selected.key, rows[0].key);
     assert.equal(manager.state.draft.description, 'Keep draft');
@@ -1344,4 +1344,712 @@ test('Enter opens the focused row after Ctrl navigation rather than the previous
     keys.press('Enter');
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(opened, rows[1].key);
+});
+
+function runtimeSourcePack(root, name, id = 'custom:rifle', texture = 'default skin') {
+    const [ns, gun] = id.split(':'), folder = path.join(root, name);
+    const write = (relative, data) => { const file = path.join(folder, relative); fs.mkdirSync(path.dirname(file), {recursive: true}); fs.writeFileSync(file, typeof data === 'string' ? data : JSON.stringify(data)); };
+    write(`data/${ns}/index/guns/${gun}.json`, {display: `${ns}:${gun}_display`, name: 'Custom Rifle'});
+    write(`assets/${ns}/display/guns/${gun}_display.json`, {model: `${ns}:gun/${gun}_geo`, texture: `${ns}:gun/uv/${gun}`});
+    write(`assets/${ns}/geo_models/gun/${gun}_geo.json`, {'minecraft:geometry': [{description: {identifier: 'geometry.rifle'}, bones: []}]});
+    write(`assets/${ns}/textures/gun/uv/${gun}.png`, texture);
+    write(`assets/${ns}/textures/gun/uv/${gun}_n.png`, 'default normal');
+    return folder;
+}
+
+test('controller discovers installed items, prepares canonical models, and remembers their paths for offline use', async t => {
+    const {controller, root, local, nativeRequire, requests} = setup(t);
+    const directory = path.join(root, 'gunpacks');
+    runtimeSourcePack(directory, 'Custom');
+    local.setItem('mcpskins_asset_manager.gunpacks.v1', JSON.stringify({directories: {[root]: directory}, choices: {}}));
+    const catalog = controller.ensureGunPacks();
+    assert.equal(controller.manager.state.gunPackItems[0].id, 'custom:rifle');
+    assert.equal(controller.ensureGunPacks(), catalog);
+    assert.ok(requests.some(request => request.name === 'fs' && request.options.scope === directory));
+    controller.manager.clear();
+    Object.assign(controller.manager.state.draft, {weapon: 'custom:rifle', label: 'Aurora', id: 'rifle_aurora', collection: 'Test', description: 'Test'});
+    let opened;
+    controller.bridge.openModel = files => { opened = files; };
+    await controller.openModel();
+    assert.equal(opened.model, path.join(root, 'Example/assets/custom/geo_models/gun/rifle_geo__skin_rifle_aurora.json'));
+    assert.equal(fs.readFileSync(opened.texture, 'utf8'), 'default skin');
+    assert.equal(fs.readFileSync(opened.normal, 'utf8'), 'default normal');
+    const metadata = JSON.parse(fs.readFileSync(path.join(root, 'Example/mcpskins_manager.json'), 'utf8'));
+    assert.equal(metadata.weapon_models['gun:custom:rifle'], 'custom:gun/rifle_geo');
+    const restarted = new Controller(nativeRequire, local);
+    t.after(() => restarted.dispose());
+    restarted.start();
+    assert.equal(restarted.manager.repository.paths.modelForSkin('custom:rifle', 'rifle_aurora'), opened.model);
+    runtimeSourcePack(directory, 'Other', 'another:gun');
+    assert.equal(controller.ensureGunPacks().items.length, 1);
+    controller.rescanGunPacks();
+    assert.equal(controller.catalog.items.length, 2);
+});
+
+test('source selection is remembered and cancellation or unload creates no skin assets', async t => {
+    const {controller, root, local} = setup(t), dialogs = dialogEnvironment(t);
+    const directory = path.join(root, 'gunpacks');
+    const one = runtimeSourcePack(directory, 'One', 'custom:rifle', 'one');
+    runtimeSourcePack(directory, 'Two', 'custom:rifle', 'two');
+    const index = path.join(one, 'data/custom/index/guns/rifle.json');
+    fs.writeFileSync(index, JSON.stringify({display: 'custom:rifle_display', name: 'First variant'}));
+    local.setItem('mcpskins_asset_manager.gunpacks.v1', JSON.stringify({directories: {[root]: directory}}));
+    controller.manager.clear();
+    Object.assign(controller.manager.state.draft, {weapon: 'custom:rifle', label: 'Aurora', id: 'rifle_aurora', collection: 'Test', description: 'Test'});
+    let opened;
+    controller.bridge.openModel = files => { opened = files; };
+    let pending = controller.openModel();
+    assert.equal(dialogs.at(-1).id, 'mcpskins_gunpack_source');
+    dialogs.at(-1).options.onCancel();
+    await pending;
+    assert.equal(opened, undefined);
+    assert.equal(fs.existsSync(path.join(root, 'Example')), false);
+    pending = controller.openModel();
+    dialogs.at(-1).options.onConfirm({source: one});
+    await pending;
+    assert.equal(fs.readFileSync(opened.texture, 'utf8'), 'one');
+    const saved = JSON.parse(local.getItem('mcpskins_asset_manager.gunpacks.v1'));
+    assert.equal(saved.choices[directory]['data/custom/index/guns/rifle.json'], one);
+    assert.equal(controller.sourceRequests.size, 0);
+    controller.catalog.choices = {};
+    local.setItem('mcpskins_asset_manager.gunpacks.v1', JSON.stringify({directories: {[root]: directory}}));
+    pending = controller.openModel();
+    controller.dispose();
+    await pending;
+    assert.equal(controller.sourceRequests.size, 0);
+});
+
+test('TaCZ directory override scans without changing skin drafts and can be restored later', t => {
+    const {controller, root, local} = setup(t), dialogs = dialogEnvironment(t);
+    const directory = path.join(root, 'custom-source');
+    runtimeSourcePack(directory, 'Example');
+    controller.manager.clear(); controller.edit('description', 'Keep draft');
+    controller.configureGunPacks();
+    const dialog = dialogs.at(-1);
+    dialog.options.onConfirm({directory});
+    assert.equal(dialog.visible, false);
+    assert.equal(controller.gunPackDirectory(), directory);
+    assert.equal(controller.manager.state.draft.description, 'Keep draft');
+    assert.equal(controller.manager.state.dirty, true);
+    assert.equal(JSON.parse(local.getItem('mcpskins_asset_manager.gunpacks.v1')).directories[root], directory);
+});
+
+test('unsaved legacy models are not migrated until their model and textures are saved', async t => {
+    const {controller, root, local} = setup(t), directory = path.join(root, 'sources');
+    runtimeSourcePack(directory, 'Custom');
+    local.setItem('mcpskins_asset_manager.gunpacks.v1', JSON.stringify({directories: {[root]: directory}}));
+    controller.manager.clear();
+    Object.assign(controller.manager.state.draft, {weapon: 'custom:rifle', label: 'Aurora', id: 'rifle_aurora', collection: 'Test', description: 'Test'});
+    const folder = controller.manager.repository.paths.textures('custom:rifle');
+    fs.mkdirSync(folder, {recursive: true});
+    const legacy = path.join(folder, 'rifle_aurora.geo.json');
+    fs.writeFileSync(legacy, JSON.stringify({'minecraft:geometry': [{bones: []}]}));
+    ModelProject.all.push({export_path: legacy, saved: false, textures: []});
+    let opened;
+    controller.bridge.openModel = files => { opened = files; };
+    await controller.openModel();
+    assert.equal(opened, undefined);
+    assert.equal(fs.existsSync(path.join(root, 'Example/assets/custom/geo_models/gun/rifle_geo__skin_rifle_aurora.json')), false);
+    ModelProject.all[0].saved = true;
+    await controller.openModel();
+    assert.ok(opened.model.endsWith('rifle_geo__skin_rifle_aurora.json'));
+});
+
+test('new skin fields and variant goals survive draft recovery without changing the pack author', async t => {
+    const {controller, manager, rows, repository, local, nativeRequire} = multipleSkins(t);
+    await controller.updatePackMetadata({author: 'Pack Team'}, repository.paths.pack);
+    const root = rows.find(row => row.skin.id === 'ai_awp_alpha'), child = rows.find(row => row.skin.id === 'ai_awp_bravo');
+    manager.select(root);
+    controller.edit('author', 'Individual'); controller.edit('subtitle', 'A short line'); controller.edit('limited', true);
+    controller.edit('variants', [child.skin.id]);
+    controller.edit('levels', [{variant: child.skin.id, requires: {kills: '25', headshots: '5'}}]);
+    const restored = new Controller(nativeRequire, local);
+    t.after(() => restored.dispose()); restored.start();
+    assert.equal(restored.manager.state.draft.author, 'Individual');
+    assert.equal(restored.manager.state.draft.subtitle, 'A short line');
+    assert.equal(restored.manager.state.draft.limited, true);
+    assert.deepEqual(restored.manager.state.draft.variants, [child.skin.id]);
+    assert.deepEqual(restored.manager.state.draft.levels[0].requires, {kills: '25', headshots: '5'});
+    assert.equal(restored.manager.state.packMetadata.author, 'Pack Team');
+    await restored.save();
+    const saved = restored.manager.selected.skin;
+    assert.equal(saved.author, 'Individual');
+    assert.deepEqual(saved.levels[0].requires, {kills: 25, headshots: 5});
+    assert.equal(restored.manager.state.packMetadata.author, 'Pack Team');
+    assert.equal(Object.hasOwn(repository.read(root.filename), 'author'), false);
+});
+
+test('variant editor changes are immutable, remove linked goals, and preserve unknown level properties', () => {
+    const {variantEditor} = require('../src/ui/variant-editor');
+    const events = [];
+    const original = [{variant: 'blue', requires: {kills: 100}, future: {keep: true}}];
+    const instance = {variants: ['blue', 'gold'], levels: original, $emit(name, value) { events.push({name, value}); this[name] = value; }};
+    for (const [key, method] of Object.entries(variantEditor.methods)) instance[key] = method.bind(instance);
+    instance.setGoal(0, 'headshots', '10');
+    assert.deepEqual(original, [{variant: 'blue', requires: {kills: 100}, future: {keep: true}}]);
+    assert.deepEqual(instance.levels[0].requires, {kills: 100, headshots: '10'});
+    assert.deepEqual(instance.levels[0].future, {keep: true});
+    instance.addLevel(); assert.equal(instance.levels[1].variant, 'gold');
+    instance.moveLevel(1, -1); assert.equal(instance.levels[0].variant, 'gold');
+    instance.toggle('blue', false);
+    assert.deepEqual(instance.variants, ['gold']);
+    assert.equal(instance.levels.length, 1);
+    assert.equal(instance.levels[0].variant, 'gold');
+    instance.clearVariants(); assert.deepEqual(instance.variants, []); assert.deepEqual(instance.levels, []);
+});
+
+test('new metadata fields and the variant/level editor render with native Blockbench Vue', t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {variantEditor} = require('../src/ui/variant-editor');
+    const {controller, manager, rows} = multipleSkins(t);
+    manager.select(rows[0]);
+    manager.edit('author', 'Individual Artist'); manager.edit('subtitle', 'Flavor line'); manager.edit('limited', true);
+    const errors = [];
+    Vue.config.warnHandler = message => errors.push(message); Vue.config.errorHandler = error => errors.push(error.message);
+    const component = panelComponent(controller), panel = new Vue({...component, ...Vue.compile(component.template)});
+    assert.ok(panel._render());
+    const editor = new Vue({...variantEditor, ...Vue.compile(variantEditor.template), propsData: {
+        variants: ['blue', 'gold'], levels: [{variant: 'gold', requires: {kills: 100, headshots: 10}}],
+        candidates: [{id: 'blue', name: 'Blue', reason: ''}, {id: 'gold', name: 'Gold', reason: ''}], owner: ''
+    }});
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    const nodes = flatten(editor._render());
+    assert.equal(nodes.filter(node => node.tag === 'input' && node.data.attrs.type === 'number').length, 3);
+    assert.ok(nodes.some(node => node.text && node.text.includes('Level 2')));
+    editor.owner = 'Parent skin'; assert.ok(editor._render());
+    editor.levels = [null, {variant: 'bad', requires: {unknown_counter: 1}}]; assert.ok(editor._render());
+    assert.deepEqual(errors, []);
+    editor.$destroy(); panel.$destroy();
+});
+
+test('variant flags find parents outside filters and scope duplicate skin IDs to their registry file', t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {controller, manager, rows} = multipleSkins(t);
+    const parent = rows[0], child = rows.find(row => row.filename === parent.filename && row.key !== parent.key);
+    const unrelated = rows.find(row => row.filename !== parent.filename);
+    parent.skin.variants = [child.skin.id];
+    unrelated.skin.id = child.skin.id;
+    manager.state.search = child.skin.name;
+    const component = panelComponent(controller), panel = new Vue({...component, ...Vue.compile(component.template)});
+    const tooltip = 'This skin is a variant of ' + parent.skin.name;
+    assert.equal(panel.variantFlags.get(child.key), tooltip);
+    assert.equal(panel.variantFlags.has(unrelated.key), false);
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    const flags = flatten(panel._render()).filter(node => node.data?.staticClass?.includes('mcpskins-variant-flag'));
+    assert.equal(flags.length, 1);
+    assert.equal(flags[0].data.attrs.title, tooltip);
+    panel.$destroy();
+});
+
+test('malformed recovered relationship arrays are ignored rather than loaded into the editor', t => {
+    const {controller, local, nativeRequire} = setup(t);
+    controller.manager.clear();
+    controller.edit('author', 'Artist');
+    const key = 'mcpskins_asset_manager.draft.v1', saved = JSON.parse(local.getItem(key));
+    saved.draft.variants = {invalid: true}; local.setItem(key, JSON.stringify(saved));
+    const restored = new Controller(nativeRequire, local); t.after(() => restored.dispose()); restored.start();
+    assert.equal(restored.manager.state.dirty, false);
+    assert.deepEqual(restored.manager.state.draft.variants, []);
+});
+
+test('Add Level creates a row before selecting variants and reward selection saves through the real Vue event wiring', async t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {variantEditor} = require('../src/ui/variant-editor');
+    const {controller, manager, rows} = multipleSkins(t);
+    const root = rows.find(row => row.skin.id === 'ai_awp_alpha'), child = rows.find(row => row.skin.id === 'ai_awp_bravo');
+    manager.select(root);
+    const warnings = [];
+    Vue.config.warnHandler = message => warnings.push(message); Vue.config.errorHandler = error => warnings.push(error.message);
+    const component = panelComponent(controller), parent = new Vue({...component, ...Vue.compile(component.template)});
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    const children = [];
+    const editor = () => {
+        const vnode = flatten(parent._render()).find(node => node.componentOptions && node.componentOptions.tag === 'variant-editor');
+        const view = new Vue({...variantEditor, ...Vue.compile(variantEditor.template), propsData: vnode.componentOptions.propsData, _parentListeners: vnode.componentOptions.listeners});
+        children.push(view); return view;
+    };
+    let view = editor();
+    const button = flatten(view._render()).find(node => node.tag === 'button' && (node.children || []).some(child => child.text === 'Add Level'));
+    assert.equal(Boolean(button.data.attrs.disabled), false);
+    button.data.on.click();
+    assert.equal(manager.state.draft.levels.length, 1);
+    assert.equal(manager.state.draft.levels[0].variant, '');
+    assert.equal(manager.state.dirty, true);
+    view = editor();
+    assert.ok(view.levelCandidates.some(candidate => candidate.id === child.skin.id));
+    view.selectTarget(0, child.skin.id);
+    assert.deepEqual(Array.from(manager.state.draft.variants), [child.skin.id]);
+    assert.equal(manager.state.draft.levels[0].variant, child.skin.id);
+    view = editor(); view.setGoal(0, 'kills', '10');
+    await controller.save();
+    assert.deepEqual(Array.from(manager.selected.skin.variants), [child.skin.id]);
+    assert.deepEqual(JSON.parse(JSON.stringify(manager.selected.skin.levels)), [{variant: child.skin.id, requires: {kills: 10}}]);
+    assert.deepEqual(warnings, []);
+    children.forEach(view => view.$destroy()); parent.$destroy();
+});
+
+test('Add Level explains missing reward skins and remains disabled for a child variant', t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {variantEditor} = require('../src/ui/variant-editor');
+    const view = new Vue({...variantEditor, ...Vue.compile(variantEditor.template), propsData: {variants: [], levels: [{variant: '', requires: {}}], candidates: [], owner: ''}});
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    assert.ok(flatten(view._render()).some(node => node.text && node.text.includes('Create or duplicate another skin')));
+    view.owner = 'Parent skin';
+    const button = flatten(view._render()).find(node => node.tag === 'button' && (node.children || []).some(child => child.text === 'Add Level'));
+    assert.equal(button.data.attrs.disabled, true);
+    view.$destroy();
+});
+
+function chooseUnsaved(globals, label) {
+    const index = globals.prompt.options.buttons.indexOf(label);
+    assert.ok(index >= 0, 'Expected prompt choice: ' + label);
+    globals.prompt.callback(index);
+}
+
+test('Save and Continue saves the current skin and selects a fresh target without a later conflict', async t => {
+    const {controller, manager, rows, repository, globals} = multipleSkins(t);
+    const first = rows.find(row => row.skin.id === 'ai_awp_alpha'), next = rows.find(row => row.skin.id === 'ai_awp_bravo');
+    manager.select(first); controller.edit('description', 'Saved before selecting');
+    manager.state.search = 'ai_awp';
+    const pending = controller.select(next);
+    assert.deepEqual(globals.prompt.options.buttons, ['Save and Continue', 'Discard', 'Cancel']);
+    chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, true);
+    assert.equal(manager.selected.skin.id, next.skin.id);
+    assert.equal(manager.selected.data.skins[first.index].description, 'Saved before selecting');
+    assert.equal(manager.state.search, 'ai_awp');
+    controller.edit('description', 'Next skin edit'); await controller.save();
+    assert.equal(repository.read(next.filename).skins[next.index].description, 'Next skin edit');
+    assert.equal(repository.read(first.filename).skins[first.index].description, 'Saved before selecting');
+});
+
+test('Discard continues without saving while Cancel leaves the operation and draft unchanged', async t => {
+    const {controller, manager, rows, repository, globals} = multipleSkins(t);
+    manager.select(rows[0]); controller.edit('description', 'Discard me');
+    const before = fs.readFileSync(rows[0].filename, 'utf8');
+    let pending = controller.select(rows[1]); chooseUnsaved(globals, 'Cancel');
+    assert.equal(await pending, false); assert.equal(manager.state.draft.description, 'Discard me');
+    pending = controller.select(rows[1]); chooseUnsaved(globals, 'Discard');
+    assert.equal(await pending, true); assert.equal(manager.selected.skin.id, rows[1].skin.id);
+    assert.equal(fs.readFileSync(rows[0].filename, 'utf8'), before);
+    assert.equal(manager.state.dirty, false);
+});
+
+test('Save and Continue duplicates the newly saved metadata instead of the old row snapshot', async t => {
+    const {controller, manager, rows, globals} = multipleSkins(t);
+    manager.select(rows[0]); controller.edit('description', 'Updated original');
+    const pending = controller.duplicateSkin(rows[0]); chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, true);
+    assert.equal(manager.state.duplicatePending, true);
+    assert.equal(manager.state.draft.description, 'Updated original');
+    assert.equal(manager.duplicateSource.skin.description, 'Updated original');
+});
+
+test('Save and Continue includes a newly saved skin in Select All and refreshes batch-edit snapshots', async t => {
+    const {controller, manager, rows, globals} = multipleSkins(t);
+    manager.clear();
+    Object.assign(manager.state.draft, {weapon: 'tacz:ak47', label: 'Echo', collection: 'Test', description: 'New skin'});
+    controller.edit('author', 'Artist');
+    let pending = controller.selectAll(); chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, true);
+    assert.equal(manager.selection.length, 5);
+    assert.ok(manager.selection.some(row => row.skin.id === 'ak47_echo'));
+    controller.edit('subtitle', 'Batch change');
+    pending = controller.select(manager.state.rows[0]); chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, true);
+    assert.equal(manager.selected.skin.subtitle, 'Batch change');
+    controller.edit('author', 'Follow-up'); await controller.save();
+    assert.equal(manager.selected.skin.author, 'Follow-up');
+});
+
+test('failed saves stop the pending operation and retain dirty edits and recovery data', async t => {
+    const {controller, manager, rows, repository, globals, local} = multipleSkins(t);
+    manager.select(rows[0]); controller.edit('description', '');
+    let pending = controller.newSkin(); chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, false);
+    assert.equal(manager.selected.skin.id, rows[0].skin.id);
+    assert.equal(manager.state.dirty, true);
+    assert.ok(local.getItem('mcpskins_asset_manager.draft.v1'));
+    assert.equal(controller.switching, false);
+    controller.edit('description', 'Valid but cannot write');
+    const before = fs.readFileSync(rows[0].filename, 'utf8');
+    repository.fs = {...fs, renameSync() { throw new Error('Simulated write failure'); }};
+    pending = controller.refresh(); chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, false);
+    assert.equal(manager.state.draft.description, 'Valid but cannot write');
+    assert.equal(manager.state.dirty, true);
+    assert.equal(fs.readFileSync(rows[0].filename, 'utf8'), before);
+    assert.equal(fs.existsSync(rows[0].filename + '.tmp'), false);
+});
+
+test('canceling a required name-prefix prompt cancels Save and Continue too', async t => {
+    const {controller, manager, globals, root} = multipleSkins(t), dialogs = dialogEnvironment(t);
+    manager.clear();
+    Object.assign(manager.state.draft, {weapon: 'custom:rifle', label: 'Draft', collection: 'Test', description: 'Keep'});
+    controller.edit('subtitle', 'Unsaved');
+    const pending = controller.newSkin(); chooseUnsaved(globals, 'Save and Continue');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(dialogs.at(-1).id, 'mcpskins_weapon_prefix');
+    dialogs.at(-1).options.onCancel();
+    assert.equal(await pending, false);
+    assert.equal(manager.state.draft.weapon, 'custom:rifle');
+    assert.equal(manager.state.draft.subtitle, 'Unsaved');
+    assert.equal(manager.state.dirty, true);
+    assert.equal(controller.switching, false);
+});
+
+test('Save and Continue saves the old pack before applying a pack switch', async t => {
+    const {controller, manager, rows, repository, globals, root} = multipleSkins(t), dialogs = dialogEnvironment(t);
+    manager.select(rows[0]); controller.edit('description', 'Saved in old pack');
+    const other = path.join(root, 'Other'); fs.mkdirSync(other);
+    controller.configure();
+    const dialog = dialogs.at(-1);
+    dialog.options.onConfirm({pack_directory: other, pack_namespace: 'other'});
+    chooseUnsaved(globals, 'Save and Continue');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(manager.state.folder, 'Other');
+    assert.equal(dialog.visible, false);
+    assert.equal(repository.read(rows[0].filename).skins[rows[0].index].description, 'Saved in old pack');
+});
+
+test('Save and Continue lets health navigation select a skin renamed by the save', async t => {
+    const {controller, manager, rows, globals} = multipleSkins(t), dialogs = dialogEnvironment(t);
+    manager.select(rows[0]); controller.edit('id', 'renamed_skin');
+    const report = await controller.healthCheck(), dialog = dialogs.at(-1);
+    const issue = report.issues.find(issue => issue.rowKey === rows[0].key);
+    const pending = dialog.options.component.methods.select(issue);
+    chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, true);
+    assert.equal(manager.selected.skin.id, 'renamed_skin');
+    assert.equal(dialog.visible, false);
+});
+
+test('Save and Continue follows the intended target if unrelated entries were reordered on disk', async t => {
+    const {controller, manager, rows, repository, globals} = multipleSkins(t);
+    const first = rows.find(row => row.skin.id === 'ai_awp_alpha'), next = rows.find(row => row.skin.id === 'ai_awp_bravo');
+    manager.select(first); controller.edit('description', 'Saved');
+    const data = repository.read(first.filename);
+    data.skins.splice(1, 0, {...data.skins[1], id: 'ai_awp_external'});
+    fs.writeFileSync(first.filename, JSON.stringify(data));
+    const pending = controller.select(next); chooseUnsaved(globals, 'Save and Continue');
+    assert.equal(await pending, true);
+    assert.equal(manager.selected.skin.id, 'ai_awp_bravo');
+    assert.equal(manager.selected.index, 2);
+});
+
+
+test('native rarity dropdowns follow the selected pack and Reset uses the pack rarity color', t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {PackPaths} = require('../src/domain/paths');
+    const {RegistryRepository} = require('../src/storage/registry');
+    const {controller, manager, repository, root, rows} = multipleSkins(t);
+    const directory = path.join(repository.paths.pack, 'data', 'another_namespace', 'skin_rarities');
+    fs.mkdirSync(directory, {recursive: true});
+    fs.writeFileSync(path.join(directory, 'mythic.json'), JSON.stringify({name: 'Mythic', color: '#FF4FD8', order: 500}));
+    manager.reload();
+    manager.select(manager.state.rows.find(row => row.key === rows[0].key));
+    const errors = [];
+    Vue.config.warnHandler = message => errors.push(message); Vue.config.errorHandler = error => errors.push(error.message);
+    const component = panelComponent(controller), panel = new Vue({...component, ...Vue.compile(component.template)});
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    const options = () => flatten(panel._render()).filter(node => node.tag === 'option' && node.data?.domProps?.value === 'mythic');
+    assert.equal(options().length, 2); // Filter and inspector selectors.
+    assert.ok(options().every(node => node.children[0].text === 'Mythic'));
+    manager.edit('rarity', 'mythic');
+    manager.edit('color', '#112233');
+    controller.resetColor();
+    assert.equal(manager.state.draft.color, '#FF4FD8');
+    const second = new RegistryRepository(fs, new PackPaths(path, root, 'Second', 'second'));
+    manager.attach(second);
+    assert.equal(options().length, 0);
+    manager.attach(repository);
+    manager.select(manager.state.rows[0]);
+    assert.equal(options().length, 2);
+    assert.deepEqual(errors, []);
+    panel.$destroy();
+});
+
+
+test('Gun Packs menu rescans item families and custom rarities with completion feedback while preserving unsaved edits', t => {
+    const {controller, manager, repository, rows, root, globals} = multipleSkins(t), dialogs = dialogEnvironment(t);
+    const directory = path.join(root, 'sources'), source = runtimeSourcePack(directory, 'Mixed');
+    for (const [folder, id] of [['attachments', 'scope'], ['melee', 'knife'], ['throwables', 'grenade'], ['consumables', 'medkit']]) {
+        const filename = path.join(source, 'data/addon/index', folder, id + '.json');
+        fs.mkdirSync(path.dirname(filename), {recursive: true});
+        fs.writeFileSync(filename, JSON.stringify({name: id}));
+    }
+    const rarityFile = path.join(repository.paths.pack, 'data/other/skin_rarities/mythic.json');
+    fs.mkdirSync(path.dirname(rarityFile), {recursive: true});
+    fs.writeFileSync(rarityFile, JSON.stringify({name: 'Mythic', color: '#FF4FD8'}));
+    manager.select(rows[0]); controller.edit('description', 'Keep my unsaved edits');
+    const selected = manager.state.selectedKeys.slice(), draft = manager.state.draft;
+    controller.configureGunPacks();
+    const dialog = dialogs.at(-1);
+    assert.deepEqual(dialog.options.buttons, ['Rescan', 'Cancel']);
+    dialog.options.onConfirm({directory});
+    assert.equal(dialog.visible, false);
+    assert.equal(globals.prompt.options.title, 'Scan complete');
+    for (const label of ['Guns', 'Attachments', 'Melee', 'Throwables', 'Consumables', 'Custom rarities']) {
+        assert.ok(globals.prompt.options.message.includes(label + ': 1'));
+    }
+    assert.equal(manager.state.rarities.mythic.color, '#FF4FD8');
+    assert.equal(manager.state.draft, draft);
+    assert.equal(manager.state.draft.description, 'Keep my unsaved edits');
+    assert.equal(manager.state.dirty, true);
+    assert.deepEqual(manager.state.selectedKeys, selected);
+    assert.ok(manager.state.gunPackMessage.includes('1 melee'));
+    fs.unlinkSync(rarityFile);
+    controller.rescanGunPacks();
+    assert.equal(Object.hasOwn(manager.state.rarities, 'mythic'), false);
+    assert.ok(globals.prompt.options.message.includes('Custom rarities: 0'));
+});
+
+test('failed gun-pack rescans still refresh rarities and report the failure instead of scan completion', async t => {
+    const {controller, root, globals} = setup(t);
+    const file = path.join(controller.manager.repository.paths.pack, 'data/other/skin_rarities/mythic.json');
+    fs.mkdirSync(path.dirname(file), {recursive: true});
+    fs.writeFileSync(file, '{}');
+    controller.gunPackDirectory = () => path.join(root, 'missing_sources');
+    await controller.rescanGunPacks();
+    assert.ok(Object.hasOwn(controller.manager.state.rarities, 'mythic'));
+    assert.notEqual(globals.prompt.options.title, 'Scan complete');
+    assert.ok(globals.prompt.options.message.includes('does not exist'));
+});
+
+
+function healthySavedPack(t) {
+    const context = setup(t), {controller} = context, repository = controller.manager.repository;
+    const result = repository.save({...controller.manager.state.draft, weapon: 'tacz:ai_awp', label: 'Healthy', collection: 'Test', description: 'Test'});
+    controller.manager.reload();
+    const folder = repository.paths.textures('tacz:ai_awp');
+    fs.mkdirSync(folder, {recursive: true});
+    const asset = suffix => path.join(folder, result.id + suffix);
+    const png = (width = 32, height = 32) => {
+        const bytes = Buffer.alloc(24); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+        bytes.write('IHDR', 12); bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20); return bytes;
+    };
+    fs.writeFileSync(asset('.json'), JSON.stringify({'minecraft:geometry': [{bones: []}]}));
+    fs.writeFileSync(asset('.png'), png());
+    fs.writeFileSync(asset('_hud.png'), png(96, 32));
+    fs.writeFileSync(asset('_icon.png'), png());
+    return {...context, repository, asset, png};
+}
+
+test('live health polls saved files, prioritizes errors, caches unchanged packs, and stops on disposal', t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'setInterval']});
+    const {controller, asset, png} = healthySavedPack(t), state = controller.manager.state;
+    t.mock.timers.tick(3000);
+    assert.equal(state.health.status, 'good');
+    const report = controller.healthReport;
+    assert.equal(controller.updateHealth(), report);
+    fs.unlinkSync(asset('_hud.png'));
+    t.mock.timers.tick(3000);
+    assert.equal(state.health.status, 'warning');
+    assert.equal(state.health.warnings, 1);
+    fs.writeFileSync(asset('.png'), 'corrupt');
+    t.mock.timers.tick(3000);
+    assert.equal(state.health.status, 'error');
+    assert.equal(state.health.errors, 1);
+    fs.writeFileSync(asset('.png'), png());
+    fs.writeFileSync(asset('_hud.png'), png(96, 32));
+    t.mock.timers.tick(3000);
+    assert.equal(state.health.status, 'good');
+    controller.dispose();
+    fs.unlinkSync(asset('.png'));
+    t.mock.timers.tick(6000);
+    assert.equal(state.health.status, 'good');
+    assert.equal(controller.updateHealth(), null);
+});
+
+test('health ignores persist per pack, preserve drafts and metadata, and can be restored', async t => {
+    const {controller, repository, asset, root, local, nativeRequire} = healthySavedPack(t);
+    const {PackPaths} = require('../src/domain/paths');
+    const {RegistryRepository} = require('../src/storage/registry');
+    const {loadPackMetadata, savePackMetadata} = require('../src/storage/pack-metadata');
+    savePackMetadata(fs, repository.paths, {title: 'Keep title', author: 'Team', future: {keep: true}});
+    controller.manager.select(controller.manager.state.rows[0]);
+    controller.edit('description', 'Keep unsaved draft');
+    fs.unlinkSync(asset('_hud.png'));
+    const report = controller.updateHealth(), issue = report.issues[0];
+    assert.equal(controller.manager.state.health.status, 'warning');
+    const ignored = await controller.setHealthIgnored(repository, issue, true);
+    assert.equal(ignored.issues[0].ignored, true);
+    assert.equal(controller.manager.state.health.status, 'good');
+    assert.equal(controller.manager.state.health.ignored, 1);
+    assert.equal(controller.manager.state.dirty, true);
+    assert.equal(controller.manager.state.draft.description, 'Keep unsaved draft');
+    const metadata = loadPackMetadata(fs, repository.paths);
+    assert.equal(metadata.title, 'Keep title'); assert.equal(metadata.author, 'Team');
+    assert.deepEqual(metadata.future, {keep: true});
+    assert.equal(metadata.ignored_health_issues.length, 1);
+    const restarted = new Controller(nativeRequire, local); t.after(() => restarted.dispose()); restarted.start();
+    assert.equal(restarted.updateHealth().issues[0].ignored, true);
+    const other = new RegistryRepository(fs, new PackPaths(path, root, 'Other', 'other'));
+    controller.manager.attach(other);
+    assert.equal(await controller.setHealthIgnored(repository, issue, false), null);
+    controller.updateHealth(); assert.equal(controller.manager.state.health.status, 'error');
+    controller.manager.attach(repository);
+    controller.updateHealth(); assert.equal(controller.manager.state.health.status, 'good');
+    const restored = await controller.setHealthIgnored(repository, issue, false);
+    assert.equal(restored.issues[0].ignored, false);
+    assert.equal(controller.manager.state.health.status, 'warning');
+    assert.deepEqual(loadPackMetadata(fs, repository.paths).ignored_health_issues, []);
+});
+
+test('health ignore keys are portable, distinguish findings, and failed persistence does not hide an issue', async t => {
+    const {controller, repository, asset, root, globals} = healthySavedPack(t);
+    const {healthIssueKey} = require('../src/assets/health-monitor');
+    const {PackPaths} = require('../src/domain/paths');
+    fs.unlinkSync(asset('_hud.png'));
+    const report = controller.updateHealth(), issue = report.issues[0];
+    const moved = new PackPaths(path, path.join(root, 'relocated'), 'Example', 'example');
+    const movedIssue = {...issue, registry: path.join(moved.pack, path.relative(repository.paths.pack, issue.registry)),
+        filename: path.join(moved.pack, path.relative(repository.paths.pack, issue.filename))};
+    assert.equal(healthIssueKey(repository.paths, issue), healthIssueKey(moved, movedIssue));
+    assert.notEqual(healthIssueKey(repository.paths, issue), healthIssueKey(repository.paths, {...issue, message: 'Different problem'}));
+    const temporary = path.join(repository.paths.pack, 'mcpskins_manager.json.tmp');
+    fs.writeFileSync(temporary, 'occupied');
+    assert.equal(await controller.setHealthIgnored(repository, issue, true), undefined);
+    assert.equal(controller.manager.state.health.status, 'warning');
+    assert.equal(controller.healthReport.issues[0].ignored, false);
+    assert.ok(globals.prompt.options.message);
+});
+
+test('native health button and report reflect live status and Ignore/Restore actions', async t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {controller, repository, asset} = healthySavedPack(t), dialogs = dialogEnvironment(t);
+    fs.unlinkSync(asset('_hud.png'));
+    const component = panelComponent(controller), panel = new Vue({...component, ...Vue.compile(component.template)});
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    const button = () => flatten(panel._render()).find(node => node.data?.staticClass?.includes('mcpskins-health-button'));
+    await controller.healthCheck();
+    const health = dialogs.at(-1).options.component, view = new Vue({...health, ...Vue.compile(health.template)});
+    assert.equal(button().data.attrs['data-health'], 'warning');
+    assert.equal(view.warnings, 1);
+    assert.ok(view._render());
+    await view.ignore(view.activeIssues[0], true);
+    assert.equal(view.activeIssues.length, 0); assert.equal(view.ignoredIssues.length, 1);
+    assert.equal(button().data.attrs['data-health'], 'good');
+    assert.ok(button().data.attrs.title.includes('1 ignored'));
+    assert.ok(view._render());
+    await view.ignore(view.ignoredIssues[0], false);
+    assert.equal(view.warnings, 1); assert.equal(view.ignoredIssues.length, 0);
+    assert.equal(button().data.attrs['data-health'], 'warning');
+    fs.writeFileSync(asset('.png'), 'corrupt'); controller.updateHealth();
+    assert.equal(button().data.attrs['data-health'], 'error');
+    assert.ok(view._render());
+    panel.$destroy(); view.$destroy();
+});
+
+
+test('Rarities dialog renders its list and inspector with native Vue and saves through real field events', async t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {controller, manager, rows} = multipleSkins(t), dialogs = dialogEnvironment(t);
+    manager.select(rows[0]); controller.edit('description', 'Keep skin draft');
+    const skinDraft = manager.state.draft;
+    await controller.openRarities();
+    const dialog = dialogs.at(-1), component = dialog.options.component;
+    assert.equal(dialog.id, 'mcpskins_rarities');
+    const errors = [];
+    Vue.config.warnHandler = message => errors.push(message); Vue.config.errorHandler = error => errors.push(error.message);
+    const view = new Vue({...component, ...Vue.compile(component.template)});
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    const text = node => (node.text || '') + (node.children || []).map(text).join('');
+    const button = label => flatten(view._render()).find(node => node.tag === 'button' && text(node) === label);
+    assert.equal(view.rows.length, 5);
+    assert.ok(view._render());
+    await button('New Rarity').data.on.click();
+    const input = (key, value) => view.edit(key, {target: {type: 'text', value}});
+    input('id', 'mythic'); input('name', 'Mythic'); input('color', '#FF4FD8'); input('order', '500');
+    view.edit('override_cost', {target: {type: 'checkbox', checked: true}});
+    input('fuse_cost', '5'); input('fusion_mode', 'weighted');
+    button('Add Target').data.on.click();
+    view.target(0, 'rarity', {target: {value: 'legendary'}});
+    view.target(0, 'weight', {target: {value: '5'}});
+    assert.ok(view._render());
+    const form = flatten(view._render()).find(node => node.tag === 'form');
+    form.data.on.submit({preventDefault() {}});
+    assert.equal(view.r.error, ''); assert.equal(view.r.selectedId, 'mythic');
+    assert.equal(manager.state.rarities.mythic.color, '#FF4FD8');
+    assert.equal(manager.state.draft, skinDraft); assert.equal(manager.state.dirty, true);
+    assert.equal(manager.state.draft.description, 'Keep skin draft');
+    const filename = path.join(manager.repository.paths.pack, 'data', manager.state.namespace, 'skin_rarities/mythic.json');
+    assert.deepEqual(JSON.parse(fs.readFileSync(filename, 'utf8')).fuses_into, [{rarity: 'legendary', weight: 5}]);
+    await view.select('legendary'); assert.equal(view.builtin, true);
+    assert.ok(button('Save Pack Override')); assert.ok(view._render());
+    assert.deepEqual(errors, []);
+    view.$destroy();
+});
+
+test('closing the Rarities dialog offers Save and Continue, Discard and Cancel without saving skin drafts', async t => {
+    const {controller, manager, globals} = multipleSkins(t), dialogs = dialogEnvironment(t);
+    await controller.openRarities();
+    const dialog = dialogs.at(-1), editor = controller.rarityEditor;
+    await editor.select('common'); editor.edit('name', 'Everyday');
+    assert.equal(dialog.options.onCancel(), false);
+    globals.prompt.callback(2); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(dialog.visible, true); assert.equal(editor.state.dirty, true);
+    dialog.options.onConfirm(); globals.prompt.callback(0); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(dialog.visible, false); assert.equal(manager.state.rarities.common.name, 'Everyday');
+    await controller.openRarities();
+    const next = dialogs.at(-1); await controller.rarityEditor.select('rare'); controller.rarityEditor.edit('name', 'Unsaved Rare');
+    next.options.onCancel(); globals.prompt.callback(1); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(next.visible, false); assert.equal(manager.state.rarities.rare.name, 'rare');
+});
+
+
+test('Open Folder creates the validated skin folder, preserves existing contents and rejects invalid paths', async t => {
+    const {controller, globals} = setup(t), repository = controller.manager.repository;
+    controller.manager.clear(); controller.edit('weapon', 'lrtactical:karambit');
+    const folder = repository.paths.textures('lrtactical:karambit'), opened = [];
+    controller.desktop.open = async (file, directory) => { assert.equal(fs.statSync(file).isDirectory(), true); opened.push({file, directory}); };
+    assert.equal(fs.existsSync(folder), false);
+    await controller.openFolder();
+    assert.deepEqual(opened, [{file: folder, directory: true}]);
+    const sentinel = path.join(folder, 'keep.txt'); fs.writeFileSync(sentinel, 'Keep this');
+    await controller.openFolder(); assert.equal(fs.readFileSync(sentinel, 'utf8'), 'Keep this');
+    controller.manager.state.draft.weapon = '../../outside';
+    await controller.openFolder();
+    assert.equal(opened.length, 2); assert.ok(globals.prompt.options.message.includes('valid namespaced weapon ID'));
+    controller.manager.state.draft.weapon = 'lrtactical:blocked';
+    const blocked = repository.paths.textures('lrtactical:blocked'); fs.writeFileSync(blocked, 'Existing file');
+    await controller.openFolder();
+    assert.equal(opened.length, 2); assert.equal(fs.readFileSync(blocked, 'utf8'), 'Existing file');
+});
+
+
+test('startup update check works without a selected pack and the native header icon opens the new GitHub release', async t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {nativeRequire, globals} = setup(t);
+    let calls = 0, finish, opened;
+    const controller = new Controller(nativeRequire, storage(), {fetch: () => { calls++; return new Promise(resolve => { finish = resolve; }); }});
+    t.after(() => controller.dispose());
+    globals.Blockbench.openLink = url => { opened = url; };
+    controller.start(); assert.equal(calls, 1); assert.equal(controller.manager.state.ready, false);
+    const component = panelComponent(controller), panel = new Vue({...component, ...Vue.compile(component.template)});
+    const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
+    const icon = () => flatten(panel._render()).find(node => node.data?.staticClass?.includes('mcpskins-update-button'));
+    assert.equal(icon(), undefined);
+    finish({ok: true, json: async () => ({tag_name: 'v1.3.0'})});
+    await controller.checkForUpdates();
+    assert.equal(calls, 1);
+    assert.ok(icon().data.attrs.title.includes('v1.3.0'));
+    icon().data.on.click();
+    assert.equal(opened, 'https://github.com/DrMjonter/MCPSkins-Manager/releases/tag/v1.3.0');
+    panel.$destroy();
+});
+
+test('unloading the plugin cancels an in-flight update check and keeps the update icon hidden', async t => {
+    const {nativeRequire} = setup(t);
+    const controller = new Controller(nativeRequire, storage(), {fetch: () => new Promise(() => {})});
+    controller.start(); const pending = controller.checkForUpdates(); controller.dispose();
+    assert.equal(await pending, null); assert.equal(controller.manager.state.update, null);
 });

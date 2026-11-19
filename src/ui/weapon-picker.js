@@ -1,11 +1,11 @@
 'use strict';
-const {searchWeapons} = require('../domain/weapon-options');
+const {searchWeapons, DEFAULT_TACZ_WEAPONS} = require('../domain/weapon-options');
 
 const weaponPicker = {
-    props: {value: {type: String, default: ''}, readonly: {type: Boolean, default: false}},
+    props: {weapons: {type: Array, default: () => DEFAULT_TACZ_WEAPONS}, value: {type: String, default: ''}, readonly: {type: Boolean, default: false}},
     data() { return {open: false, showAll: false, activeIndex: -1}; },
     computed: {
-        options() { return searchWeapons(this.showAll ? '' : this.value); },
+        options() { return searchWeapons(this.showAll ? '' : this.value, this.weapons || DEFAULT_TACZ_WEAPONS); },
         listId() { return `mcpskins_weapons_${this._uid}`; },
         activeId() { return this.open && this.activeIndex >= 0 ? `${this.listId}_${this.activeIndex}` : null; }
     },
@@ -73,17 +73,17 @@ const weaponPicker = {
                 <input ref="input" type="text" :value="value" :readonly="readonly" @input="input" @focus="focus" @keydown="keydown"
                     role="combobox" aria-label="Weapon ID" aria-autocomplete="list" :aria-expanded="open && !readonly ? 'true' : 'false'"
                     :aria-controls="listId" :aria-activedescendant="activeId" :aria-describedby="listId + '_hint'"
-                    placeholder="Search TaCZ guns or enter pack:weapon" spellcheck="false" autocomplete="off">
+                    placeholder="Search installed items or enter pack:item" spellcheck="false" autocomplete="off">
                 <button v-if="!readonly" type="button" class="mcpskins-weapon-toggle" @mousedown.prevent @click="toggle"
-                    aria-label="Show all default TaCZ guns" :aria-expanded="open ? 'true' : 'false'" :aria-controls="listId">▾</button>
+                    aria-label="Show all known items" :aria-expanded="open ? 'true' : 'false'" :aria-controls="listId">▾</button>
             </div>
-            <div v-if="open && !readonly" :id="listId" class="mcpskins-weapon-list" role="listbox" aria-label="Default TaCZ guns" @mousedown.prevent>
+            <div v-if="open && !readonly" :id="listId" class="mcpskins-weapon-list" role="listbox" aria-label="Known guns and attachments" @mousedown.prevent>
                 <div v-for="(weapon,index) in options" :key="weapon.id" :id="listId + '_' + index" role="option"
                     :aria-selected="activeIndex === index ? 'true' : 'false'" :class="['mcpskins-weapon-option',{active:activeIndex===index}]"
                     @mouseenter="activeIndex=index" @click="choose(weapon)">
                     <span>{{weapon.name}}</span><small>{{weapon.id}}</small>
                 </div>
-                <p v-if="!options.length" class="mcpskins-weapon-empty">No matching default gun. You can enter a custom pack:weapon ID.</p>
+                <p v-if="!options.length" class="mcpskins-weapon-empty">No matching item. You can enter a custom pack:weapon ID.</p>
             </div>
             <span :id="listId + '_hint'" class="mcpskins-muted">{{readonly ? 'Weapon ID is fixed for saved entries.' : 'Search by gun name or ID, or type a custom pack:weapon ID.'}}</span>
         </div>`

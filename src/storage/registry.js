@@ -1,44 +1,49 @@
 'use strict';
-const {isObject, clone, validateRegistry, baseWeapon, equalJSON, buildEntry, draftFromRow} = require('../domain/skin');
+const {isObject, clone, validateRegistry, baseWeapon, equalJSON, buildEntry, draftFromRow, BASE_KEYS, itemKind} = require('../domain/skin');
+const {assertVariants, renameVariantLinks} = require('../domain/variants');
 const {duplicateAssets} = require('../assets/preparation');
-const {RARITIES} = require('../domain/constants');
+const {scanRarities} = require('./rarities');
 const {readJSON, atomicJSON, isDirectory} = require('./files');
 
 class RegistryRepository {
     constructor(fs, paths) { this.fs = fs; this.paths = paths; }
     read(filename) { return validateRegistry(readJSON(this.fs, filename), this.paths.path.basename(filename)); }
     discover() {
-        const rows = [], warnings = [];
+        const {rarities, warnings: rarityWarnings} = scanRarities(this.fs, this.paths);
+        const rows = [], warnings = rarityWarnings.map(warning => warning.message);
         const directory = this.paths.registryDirectory;
-        if (!isDirectory(this.fs, directory)) return {rows, warnings, missing: true};
-        const files = this.fs.readdirSync(directory).filter(n => n.endsWith('_skins.json'))
+        if (!isDirectory(this.fs, directory)) return {rows, warnings, rarities, missing: true};
+        const files = this.fs.readdirSync(directory).filter(n => n.endsWith('.json'))
             .sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0);
         for (const name of files) {
             const filename = this.paths.path.join(directory, name);
             try {
-                const data = this.read(filename);
+                const raw = readJSON(this.fs, filename);
+                if (!name.endsWith('_skins.json') && (!isObject(raw) || !Object.values(BASE_KEYS).some(key => Object.hasOwn(raw, key)))) continue;
+                const data = validateRegistry(raw, name);
                 data.skins.forEach((skin, index) => {
                     if (isObject(skin)) rows.push({key: `${filename}\0${index}`, filename, data, index, skin: clone(skin)});
                 });
             } catch (error) { warnings.push(error.message); }
         }
-        return {rows, warnings, missing: false};
+        return {rows, warnings, rarities, missing: false};
     }
     saveBatch(rows, draft, changedFields) {
+        const {rarities} = scanRarities(this.fs, this.paths);
         const allowed = {rarity: 'rarity', color: 'label_color', collection: 'collection', description: 'description',
-            is_new: 'is_new', locked_text: 'locked_text', unlocked: 'unlocked', include_weight: 'weight', weight: 'weight'};
+            author: 'author', subtitle: 'subtitle', limited: 'limited', is_new: 'is_new', locked_text: 'locked_text', unlocked: 'unlocked', include_weight: 'weight', weight: 'weight'};
         const fields = [...new Set(changedFields)];
         if (fields.some(key => !Object.hasOwn(allowed, key))) throw new Error('Identity fields cannot be edited in bulk.');
         const patch = {};
         for (const key of fields) {
             let value = draft[key];
-            if (['collection', 'description', 'locked_text'].includes(key)) {
+            if (['collection', 'description', 'locked_text', 'author', 'subtitle'].includes(key)) {
                 value = value.trim();
-                if (key !== 'locked_text' && !value) throw new Error('Collection and description are required.');
+                if (['collection', 'description'].includes(key) && !value) throw new Error('Collection and description are required.');
             }
             if (key === 'rarity') {
                 value = value.toLowerCase();
-                if (!Object.hasOwn(RARITIES, value)) throw new Error('Choose a supported rarity.');
+                if (!Object.hasOwn(rarities, value)) throw new Error('Choose a supported rarity.');
             }
             if (key === 'color') {
                 if (!/^#[0-9a-f]{6}$/i.test(value.trim())) throw new Error('Use a six-digit label color.');
@@ -51,7 +56,7 @@ class RegistryRepository {
                     value = Number(text);
                 } else value = undefined;
             }
-            if ((key === 'locked_text' && !value) || (key === 'unlocked' && !value)) value = undefined;
+            if ((['locked_text', 'author', 'subtitle'].includes(key) && !value) || (['unlocked', 'limited'].includes(key) && !value)) value = undefined;
             patch[allowed[key]] = value;
         }
         const groups = new Map();
@@ -85,8 +90,21 @@ class RegistryRepository {
         return {count: rows.length};
     }
     save(draft, selected = null, defaultPrefix = null, duplicate = null) {
-        const {weapon, entry} = buildEntry(draft, selected ? selected.skin : duplicate ? duplicate.skin : null, defaultPrefix);
-        const filename = selected ? selected.filename : this.paths.registry(weapon);
+        const {rarities} = scanRarities(this.fs, this.paths);
+        const {weapon, entry} = buildEntry(draft, selected ? selected.skin : duplicate ? duplicate.skin : null, defaultPrefix, rarities);
+        let filename = selected ? selected.filename : this.paths.registry(weapon, draft.kind);
+        if (!selected && isDirectory(this.fs, this.paths.registryDirectory)) {
+            const matches = [];
+            for (const name of this.fs.readdirSync(this.paths.registryDirectory).filter(name => name.endsWith('.json'))) {
+                const candidate = this.paths.path.join(this.paths.registryDirectory, name);
+                try {
+                    const existing = this.read(candidate);
+                    if (baseWeapon(existing) === weapon && itemKind(existing) === draft.kind) matches.push(candidate);
+                } catch { /* Unrelated invalid files are reported by discovery. */ }
+            }
+            if (matches.length > 1) throw new Error('Multiple registry files declare this item. Merge them before adding another skin.');
+            if (matches.length) filename = matches[0];
+        }
         let data;
         if (selected) {
             data = this.read(filename);
@@ -97,12 +115,18 @@ class RegistryRepository {
         } else if (this.fs.existsSync(filename)) {
             data = this.read(filename);
             if (baseWeapon(data) !== weapon) throw new Error(`Weapon mismatch: this file belongs to ${baseWeapon(data)}.`);
-        } else data = {[draft.kind === 'melee' ? 'base_melee' : 'base_gun']: weapon, skins: []};
+        } else {
+            if (!Object.hasOwn(BASE_KEYS, draft.kind)) throw new Error('Choose a supported item type.');
+            data = {[BASE_KEYS[draft.kind]]: weapon, skins: []};
+        }
+        if (selected && itemKind(data) !== draft.kind) throw new Error('The item type cannot change in an existing registry.');
         const index = selected ? selected.index : data.skins.length;
         if (data.skins.some((skin, i) => isObject(skin) && skin.id === entry.id && i !== index)) {
             throw new Error(`${entry.id} already exists in ${this.paths.path.basename(filename)}.`);
         }
         data.skins[index] = entry;
+        if (selected) renameVariantLinks(data.skins, selected.skin.id, entry.id);
+        assertVariants(data.skins, [entry.id, ...(selected ? [selected.skin.id] : [])]);
         this.fs.mkdirSync(this.paths.registryDirectory, {recursive: true});
         const created = duplicate ? duplicateAssets(this.fs, this.paths, draftFromRow(duplicate), draft) : [];
         try { atomicJSON(this.fs, filename, data); }

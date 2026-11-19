@@ -173,7 +173,7 @@ test('pack settings round trip using unchanged keys and invalid settings fall ba
 
 test('pack and asset paths preserve namespaces while blocking directory traversal', t => {
     const f = fixture(t);
-    assert.equal(f.paths.textures('tacz:path/ai_awp'), path.join(f.paths.pack, 'assets/mcpskins/textures/skins/tacz/ai_awp'));
+    assert.equal(f.paths.textures('tacz:path/ai_awp'), path.join(f.paths.pack, 'assets/mcpskins/textures/skins/tacz/path/ai_awp'));
     for (const value of ['../pack', '.', '..', 'x.', 'C:\\pack', 'a/b']) assert.equal(validComponent(value), false);
     assert.throws(() => new PackPaths(path, f.root, '../escape', 'example'));
     assert.throws(() => f.paths.textures('..:ai_awp'));

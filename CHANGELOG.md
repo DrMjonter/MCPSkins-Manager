@@ -1,5 +1,22 @@
 # MCPSkins Manager
 
+## 1.2.0
+
+- Add Save and Continue to unsaved-edit prompts, preserving edits when saving fails or is canceled and continuing with fresh saved entries.
+
+- Allow Add Level before selecting variants; choosing a level reward adds its skin to the variant list automatically.
+
+- Add independent skin-author, subtitle, and Limited fields, including shared-field bulk editing and search by author/subtitle.
+- Add a same-file variant picker and ordered level editor for kills, headshots, and player kills, with safe validation and health-check diagnostics.
+- Preserve pack-author separation and registry-file author defaults; keep variant links consistent when a skin ID changes and start duplicates without shared links.
+
+- Discover installed TaCZ gun and attachment definitions from folders and ZIP packs, including cross-pack resource references.
+- Add a configurable TaCZ directory, cached discovery, Rescan Gun Packs, and remembered source choices for conflicting resources.
+- Populate weapon suggestions from installed packs while preserving default display names and custom inputs.
+- Prepare independent skin geometry at the documented MCPSkins override path and copy missing default textures, normal/specular maps, icons, HUD variants, and LOD textures.
+- Remember model locations in pack metadata, preserve existing skin files, and include resolved geometry in duplication and health checks.
+- Support attachment registries and other base-item keys, discover arbitrary registry JSON filenames, and keep the manual asset workflow available.
+
 ## 1.1.0
 
 - Make Ctrl/Cmd+A select all pack skins, including filtered-out entries, with a hidden-selection count.

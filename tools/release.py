@@ -19,8 +19,8 @@ def release():
     version = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
         raise ValueError("Invalid release version")
-    source = (ROOT / "src/plugin.js").read_text(encoding="utf-8")
-    registered = re.search(r"version:\s*['\"]([^'\"]+)['\"]", source)
+    source = (ROOT / "src/version.js").read_text(encoding="utf-8")
+    registered = re.search(r"VERSION\s*=\s*['\"]([^'\"]+)['\"]", source)
     if not registered or registered[1] != version:
         raise ValueError("package.json and plugin registration versions differ")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

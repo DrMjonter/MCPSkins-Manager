@@ -1,5 +1,6 @@
 'use strict';
 const {panelComponent} = require('./panel');
+const {PLUGIN_TITLE} = require('../version');
 
 // Blockbench hides work_screen (including docked panels) when no project is
 // selected. Host the same component on its native start screen in that case.
@@ -19,13 +20,14 @@ class StartScreenView {
         this.section = addSection('mcpskins_asset_manager', {
             closable: false,
             text: [
-                {type: 'h3', text: 'MCPSkins Manager'},
+                {type: 'h3', text: PLUGIN_TITLE},
                 {text: 'Add, edit, and browse MCPSkins'},
                 {type: 'button', text: 'Open MCPSkins Manager', click: () => this.show()}
             ]
         });
     }
     show() {
+        if (this.controller.loadGunPacks) this.controller.loadGunPacks();
         if (!this.workspace) {
             this.element = this.document.querySelector('.start_screen_section[section_id="mcpskins_asset_manager"]');
             if (!this.element) throw new Error('Blockbench’s start screen is not available.');

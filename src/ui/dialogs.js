@@ -5,11 +5,11 @@ function message(title, text) {
     Blockbench.showMessageBox({title, message: text, icon: 'info', buttons: ['OK']});
 }
 
-function confirmDiscard() {
+function confirmUnsaved(options = {}) {
     return new Promise(resolve => Blockbench.showMessageBox({
-        title: 'Discard unsaved changes?', message: 'You have unsaved MCPSkins registry edits. Discard them?',
-        buttons: ['Discard', 'Cancel'], confirm: 0, cancel: 1
-    }, result => resolve(result === 0)));
+        title: options.title || 'Unsaved MCPSkins edits', message: options.message || 'Save your registry edits before continuing?',
+        buttons: ['Save and Continue', 'Discard', 'Cancel'], confirm: 0, cancel: 2
+    }, result => resolve(result === 0 ? 'save' : result === 1 ? 'discard' : 'cancel')));
 }
 
 function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {}) {
@@ -116,4 +116,4 @@ function namePrefixDialog(weapon, accept, cancel) {
     return dialog;
 }
 
-module.exports = {recentPacksComponent, message, confirmDiscard, packDialog, colorDialog, namePrefixDialog};
+module.exports = {recentPacksComponent, message, confirmUnsaved, packDialog, colorDialog, namePrefixDialog};

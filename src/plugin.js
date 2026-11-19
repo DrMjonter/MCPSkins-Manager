@@ -1,5 +1,6 @@
 'use strict';
 const {Controller} = require('./controller');
+const {VERSION, PLUGIN_TITLE} = require('./version');
 const {panelComponent} = require('./ui/panel');
 const {StartScreenView} = require('./ui/start-screen');
 const {ManagerKeyboard} = require('./ui/keyboard');
@@ -9,14 +10,15 @@ module.exports = function register(nativeRequire) {
     let controller, panel, startScreen, toolbar, css, closeHandler, keyboardHandler;
     const actions = [];
     Plugin.register('mcpskins_asset_manager', {
-        title: 'MCPSkins Manager', author: 'Mjonter', icon: 'inventory_2',
+        title: PLUGIN_TITLE, author: 'Mjonter', icon: 'inventory_2',
         description: 'Add, edit, and browse MCPSkins',
-        version: '1.1.0', min_version: '5.1.0', variant: 'desktop',
+        version: VERSION, min_version: '5.1.0', variant: 'desktop',
         tags: ['Minecraft: Java Edition', 'Texture'],
         onload() {
             controller = new Controller(nativeRequire);
             const commands = [
                 ['mcpskins_show', 'MCPSkins Manager', 'inventory_2', () => {
+                    controller.loadGunPacks();
                     if (!Blockbench.Project) { controller.run(() => startScreen.show()); return; }
                     if (panel.slot === 'hidden') panel.moveTo('left_bar');
                     panel.fold(false); panel.selectTab(); panel.moveToFront();
@@ -37,7 +39,7 @@ module.exports = function register(nativeRequire) {
             toolbar = new Toolbar('mcpskins_asset_toolbar', {children: ['mcpskins_pack', 'mcpskins_new', 'mcpskins_refresh', 'mcpskins_save', 'mcpskins_discard']});
             css = Blockbench.addCSS(styles);
             panel = new Panel('mcpskins_asset_manager', {
-                name: 'MCPSkins Manager', icon: 'inventory_2',
+                name: PLUGIN_TITLE, icon: 'inventory_2',
                 growable: true, resizable: true, min_height: 250,
                 default_position: {slot: 'left_bar', height: 650},
                 toolbars: [toolbar], component: panelComponent(controller)

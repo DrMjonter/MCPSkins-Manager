@@ -1,7 +1,8 @@
 'use strict';
-const {isObject, baseWeapon, validWeapon, basename} = require('../domain/skin');
+const {isObject, baseWeapon, validWeapon, basename, BASE_KEYS, itemKind} = require('../domain/skin');
 const {loadPackMetadata, metadataFile} = require('../storage/pack-metadata');
-const {RARITIES} = require('../domain/constants');
+const {variantIssues} = require('../domain/variants');
+const {scanRarities} = require('../storage/rarities');
 const {readJSON, isFile, isDirectory} = require('../storage/files');
 
 function checkPack(fs, paths) {
@@ -9,39 +10,52 @@ function checkPack(fs, paths) {
     let files = 0, skins = 0;
     const add = (severity, message, filename, row = null) => issues.push({severity, message, filename,
         rowKey: row ? row.key : '', skinId: row ? String(row.skin.id ?? '') : '', registry: row ? row.filename : filename});
-    try { loadPackMetadata(fs, paths); } catch (error) { add('error', `Invalid pack metadata: ${error.message}`, metadataFile(paths)); }
+    const {rarities, warnings: rarityWarnings} = scanRarities(fs, paths);
+    for (const warning of rarityWarnings) add('warning', warning.message, warning.filename);
+    let metadata = {};
+    try { metadata = loadPackMetadata(fs, paths); } catch (error) { add('error', `Invalid pack metadata: ${error.message}`, metadataFile(paths)); }
     if (!isDirectory(fs, paths.registryDirectory)) {
         add('error', 'The skins registry directory is missing.', paths.registryDirectory);
         return {issues, files, skins};
     }
-    for (const name of fs.readdirSync(paths.registryDirectory).filter(name => name.endsWith('_skins.json')).sort()) {
+    for (const name of fs.readdirSync(paths.registryDirectory).filter(name => name.endsWith('.json')).sort()) {
         const filename = paths.path.join(paths.registryDirectory, name);
         files++;
         let data;
         try {
             data = readJSON(fs, filename);
+            if (!name.endsWith('_skins.json') && (!isObject(data) || !Object.values(BASE_KEYS).some(key => Object.hasOwn(data, key)))) { files--; continue; }
             if (!isObject(data) || !Array.isArray(data.skins) || !validWeapon(baseWeapon(data) || '')) throw new Error('Expected a namespaced base_gun/base_melee and a skins list.');
-            if (Object.hasOwn(data, 'base_gun') && Object.hasOwn(data, 'base_melee')) throw new Error('Registry contains both base_gun and base_melee.');
+            if (Object.values(BASE_KEYS).filter(key => Object.hasOwn(data, key)).length !== 1) throw new Error('Registry must contain exactly one base item key.');
         } catch (error) { add('error', error.message, filename); continue; }
         const weapon = baseWeapon(data);
-        if (name !== basename(weapon) + '_skins.json') add('warning', 'Registry filename does not match its weapon basename.', filename);
+        const family = itemKind(data);
+        if (data.author !== undefined && typeof data.author !== 'string') add('error', 'File author must be text.', filename);
+        for (const problem of variantIssues(data.skins)) {
+            const row = {key: `${filename}\0${problem.index}`, filename, skin: data.skins[problem.index]};
+            add('error', problem.message, filename, row);
+        }
         const ids = new Set();
         data.skins.forEach((skin, index) => {
             if (!isObject(skin)) { add('error', `Entry ${index + 1} is not a skin object.`, filename); return; }
             skins++;
             const row = {key: `${filename}\0${index}`, filename, data, index, skin};
             const issue = (severity, message, file = filename) => add(severity, message, file, row);
+            for (const field of ['author', 'subtitle']) if (skin[field] !== undefined && typeof skin[field] !== 'string') issue('error', field + ' must be text.');
+            if (skin.limited !== undefined && typeof skin.limited !== 'boolean') issue('error', 'limited must be true or false.');
             if (typeof skin.id !== 'string' || !/^[a-z0-9_]+$/.test(skin.id)) { issue('error', 'Skin ID is missing or invalid.'); return; }
             if (ids.has(skin.id)) issue('error', `Duplicate skin ID: ${skin.id}.`);
             ids.add(skin.id);
             for (const field of ['name', 'collection', 'description']) if (typeof skin[field] !== 'string' || !skin[field].trim()) issue('error', `Missing ${field}.`);
-            if (!Object.hasOwn(RARITIES, String(skin.rarity ?? '').toLowerCase())) issue('error', 'Unsupported rarity.');
+            if (!Object.hasOwn(rarities, String(skin.rarity ?? '').toLowerCase())) issue('error', 'Unsupported rarity.');
             if (skin.label_color !== undefined && !/^(0x|#)[0-9a-f]{6}$/i.test(String(skin.label_color))) issue('warning', 'Label color is not a six-digit RGB value.');
             if (skin.weight !== undefined && (!Number.isSafeInteger(skin.weight) || skin.weight < 1)) issue('error', 'Fusion weight must be a positive whole number.');
             let folder;
             try { folder = paths.textures(weapon); } catch (error) { issue('error', error.message); return; }
             const asset = suffix => paths.path.join(folder, skin.id + suffix);
-            const models = [asset('.json'), asset('.geo.json')].filter(file => isFile(fs, file));
+            let canonical = null;
+            try { canonical = paths.modelForSkin(weapon, skin.id, family, metadata.weapon_models || {}); } catch (error) { issue('error', error.message); }
+            const models = (canonical && isFile(fs, canonical) ? [canonical] : [asset('.json'), asset('.geo.json')]).filter(file => isFile(fs, file));
             if (!models.length) issue('warning', 'Skin geometry is missing; Open Model can create it if a source model is available.', asset('.geo.json'));
             for (const model of models) {
                 try {
@@ -50,6 +64,7 @@ function checkPack(fs, paths) {
                 } catch (error) { issue('error', `Invalid geometry: ${error.message}`, model); }
             }
             for (const [kind, suffix, required] of [['Skin', '', true], ['Normal', '_n', false], ['Specular', '_s', false], ['HUD', '_hud', false], ['Icon', '_icon', false]]) {
+                if (family !== 'gun' && suffix === '_hud') continue;
                 const file = asset(suffix + '.png');
                 if (!isFile(fs, file)) {
                     if (required) issue('error', 'Skin texture is missing.', file);

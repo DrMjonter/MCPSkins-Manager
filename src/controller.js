@@ -1,40 +1,52 @@
 'use strict';
 const {Manager} = require('./state/manager');
+const {VERSION} = require('./version');
+const {UpdateChecker} = require('./integration/updates');
 const {PackPaths, packDirectorySelection} = require('./domain/paths');
-const {clone, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames} = require('./domain/skin');
+const {clone, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames, isObject} = require('./domain/skin');
 const {THEMES} = require('./domain/constants');
 const {RegistryRepository} = require('./storage/registry');
+const {RarityRepository} = require('./storage/rarity-editor');
+const {RarityEditor} = require('./state/rarities');
+const {rarityComponent} = require('./ui/rarities');
 const {loadPackSettings, savePackSettings} = require('./storage/settings');
 const {loadPackMetadata, savePackMetadata} = require('./storage/pack-metadata');
 const {RECENT_PACKS, recentPacks, rememberPack} = require('./storage/recent-packs');
 const {atomicJSON, isDirectory} = require('./storage/files');
 const {STATUSES, saveStatuses} = require('./domain/status');
 const {checkPack} = require('./assets/health');
+const {healthSnapshot, healthSummary, healthIssueKey, applyHealthIgnores} = require('./assets/health-monitor');
 const {shortcutComponent} = require('./ui/keyboard');
 const {healthComponent} = require('./ui/health');
-const {prepareSkin} = require('./assets/preparation');
+const {GunPackCatalog, SourceConflict, modelKey, modelOutput} = require('./gunpacks/catalog');
+const {gunPackDialog, sourceDialog, itemCounts, scanSummary} = require('./ui/gunpacks');
+const {prepareSkin, assetSelection} = require('./assets/preparation');
 const {previewCards} = require('./assets/previews');
 const {Desktop} = require('./integration/desktop');
 const {BlockbenchBridge} = require('./integration/blockbench');
-const {message, confirmDiscard, packDialog, colorDialog, namePrefixDialog} = require('./ui/dialogs');
+const {message, confirmUnsaved, packDialog, colorDialog, namePrefixDialog} = require('./ui/dialogs');
 
+const GUNPACKS = 'mcpskins_asset_manager.gunpacks.v1';
 const PREFERENCES = 'mcpskins_asset_manager.preferences.v1';
 const RECOVERY = 'mcpskins_asset_manager.draft.v1';
 const WEAPON_NAMES = 'mcpskins_asset_manager.weapon_names.v1';
 
 class Controller {
-    constructor(nativeRequire, storage = localStorage) {
+    constructor(nativeRequire, storage = localStorage, options = {}) {
         this.manager = new Manager();
+        this.updates = new UpdateChecker(VERSION, options);
         this.desktop = new Desktop(nativeRequire);
         this.bridge = new BlockbenchBridge(this.desktop.path);
         this.storage = storage;
         this.timer = null;
+        this.healthTimer = null; this.healthPoll = null; this.healthRepository = null; this.healthStamp = null; this.healthReport = null;
         this.dialogs = new Set();
         this.switching = false;
         this.closingAllowed = false;
         this.closePrompt = false;
         this.disposed = false;
         this.prefixRequest = null;
+        this.catalog = null; this.catalogAttempt = ''; this.catalogRoot = ''; this.sourceRequests = new Set();
     }
     report(error) { if (!this.disposed) message('MCPSkins', error.message || String(error)); }
     run(callback) {
@@ -54,6 +66,11 @@ class Controller {
         }
     }
     start() {
+        this.checkForUpdates();
+        if (!this.healthPoll) {
+            this.healthPoll = setInterval(() => this.updateHealth(), 3000);
+            if (this.healthPoll && typeof this.healthPoll.unref === 'function') this.healthPoll.unref();
+        }
         this.manager.state.weaponNames = sanitizeWeaponNames(this.getStored(WEAPON_NAMES));
         const preferences = this.getStored(PREFERENCES);
         if (!preferences) return;
@@ -70,15 +87,28 @@ class Controller {
             this.rememberRecentPack();
             this.restoreDraft();
             this.updatePreviews();
+            this.loadGunPacks();
         } catch (error) {
             this.manager.state.root = preferences.root;
             this.manager.state.notice = error.message;
             this.report(error);
         }
     }
+    async checkForUpdates() {
+        const update = await this.updates.check();
+        if (!this.disposed) this.manager.state.update = update;
+        return update;
+    }
+    openUpdate() {
+        const update = this.manager.state.update;
+        if (!this.disposed && update && typeof Blockbench.openLink === 'function') Blockbench.openLink(update.url);
+    }
     loadMetadata() {
         const repository = this.manager.repository;
-        try { this.manager.state.packMetadata = loadPackMetadata(repository.fs, repository.paths); }
+        try {
+            this.manager.state.packMetadata = loadPackMetadata(repository.fs, repository.paths);
+            repository.paths.modelReferences = this.manager.state.packMetadata.weapon_models || {};
+        }
         catch (error) {
             this.manager.state.packMetadata = {title: 'Pack Name'};
             this.manager.state.notice = `Pack metadata unavailable: ${error.message}`;
@@ -129,6 +159,112 @@ class Controller {
         this.persist(RECENT_PACKS, history);
         return metadata.author;
     }
+    gunPackSettings() {
+        const saved = this.getStored(GUNPACKS);
+        return isObject(saved) ? {directories: isObject(saved.directories) ? saved.directories : {}, choices: isObject(saved.choices) ? saved.choices : {}} : {directories: {}, choices: {}};
+    }
+    gunPackDirectory() {
+        const s = this.manager.state, saved = this.gunPackSettings();
+        const directory = saved.directories[s.root];
+        return typeof directory === 'string' && this.desktop.path.isAbsolute(directory) ? directory : this.desktop.path.resolve(s.root, '..', 'tacz');
+    }
+    ensureGunPacks(force = false, directory = this.gunPackDirectory(), quiet = false) {
+        if (!this.manager.state.ready || this.disposed) return null;
+        directory = this.desktop.path.resolve(directory);
+        if (!force && this.catalogAttempt === directory && this.catalogRoot === this.manager.state.root) return this.catalog;
+        this.catalogAttempt = directory; this.catalogRoot = this.manager.state.root;
+        if (this.catalog) this.catalog.dispose();
+        this.catalog = null;
+        const state = this.manager.state;
+        Object.assign(state, {gunPackDirectory: directory, gunPackItems: [], gunPackMessage: 'Scanning gun packs...', gunPackWarnings: []});
+        try {
+            let addons = []; const addonWarnings = [];
+            try { addons = this.desktop.lesRaisinsSources(this.desktop.path.resolve(state.root, '..', 'mods')); }
+            catch (error) { addonWarnings.push(error.message); }
+            const connection = this.desktop.connectGunPacks(directory, addons.length > 0), saved = this.gunPackSettings();
+            const catalog = new GunPackCatalog(connection.fs, this.desktop.path, directory, this.desktop.require('zlib').inflateRawSync, saved.choices[directory] || {}, addons).scan();
+            catalog.warnings.push(...addonWarnings);
+            this.catalog = catalog;
+            Object.assign(state, {gunPackItems: catalog.items.map(({id, name, kind}) => ({id, name, kind})), gunPackWarnings: catalog.warnings,
+                gunPackMessage: itemCounts(catalog).map(([label, count]) => count + ' ' + label.toLowerCase()).join(' / ') + ` from ${catalog.sources.length} sources`});
+            return catalog;
+        } catch (error) {
+            state.gunPackMessage = error.message;
+            if (!quiet) throw error;
+            return null;
+        }
+    }
+    loadGunPacks() { return this.run(() => this.ensureGunPacks(false, this.gunPackDirectory(), true)); }
+    scanGunPacks(directory = this.gunPackDirectory()) {
+        this.manager.refreshRarities();
+        return this.ensureGunPacks(true, directory);
+    }
+    gunPackScanSummary(catalog) {
+        return scanSummary(catalog, this.manager.state.rarities, this.manager.state.warnings);
+    }
+    rescanGunPacks() {
+        return this.run(() => {
+            const catalog = this.scanGunPacks();
+            if (catalog) message('Scan complete', this.gunPackScanSummary(catalog));
+            return catalog;
+        });
+    }
+    configureGunPacks() {
+        if (!this.manager.state.ready) return;
+        this.removeDialog('mcpskins_gunpacks');
+        const dialog = gunPackDialog(this.gunPackDirectory(), directory => {
+            const catalog = this.scanGunPacks(directory);
+            if (!catalog) return false;
+            const saved = this.gunPackSettings();
+            saved.directories[this.manager.state.root] = catalog.directory;
+            this.persist(GUNPACKS, saved);
+            return this.gunPackScanSummary(catalog);
+        });
+        this.dialogs.add(dialog);
+    }
+    openRarities() {
+        if (!this.manager.state.ready || this.disposed) return;
+        if (this.rarityEditor) {
+            const existing = [...this.dialogs].find(dialog => dialog.id === 'mcpskins_rarities');
+            if (existing) { existing.show(); return existing; }
+        }
+        return this.run(() => {
+            this.removeDialog('mcpskins_rarities');
+            const repository = this.manager.repository;
+            const editor = new RarityEditor(new RarityRepository(repository.fs, repository.paths),
+                () => confirmUnsaved({title: 'Unsaved rarity edits', message: 'Save your rarity changes before continuing?'}),
+                () => { this.manager.refreshRarities(); this.updateHealth(true); },
+                () => !this.disposed && this.manager.repository === repository);
+            this.rarityEditor = editor;
+            const close = () => {
+                editor.guard(() => { dialog.hide(); if (this.rarityEditor === editor) this.rarityEditor = null; });
+                return false;
+            };
+            const dialog = new Dialog('mcpskins_rarities', {title: 'Pack Rarities', width: 1040, buttons: ['Close'], confirmIndex: 0, cancelIndex: 0,
+                component: rarityComponent(editor), onConfirm: close, onCancel: close});
+            this.dialogs.add(dialog); dialog.show(); return dialog;
+        });
+    }
+    async resolveGunPack(draft) {
+        const catalog = this.ensureGunPacks(false, this.gunPackDirectory(), true);
+        if (!catalog) return null;
+        for (let attempts = 0; attempts < 32; attempts++) {
+            try { return catalog.resolve(draft.weapon, draft.kind); }
+            catch (error) {
+                if (!(error instanceof SourceConflict)) throw error;
+                const choice = await new Promise(resolve => {
+                    const finish = value => { this.sourceRequests.delete(finish); resolve(value); };
+                    this.sourceRequests.add(finish);
+                    this.removeDialog('mcpskins_gunpack_source');
+                    const dialog = sourceDialog(error, finish); this.dialogs.add(dialog);
+                });
+                if (!choice || this.disposed || this.catalog !== catalog || this.manager.state.draft !== draft) return false;
+                catalog.choices[error.resource] = choice;
+                const saved = this.gunPackSettings(); saved.choices[catalog.directory] = {...catalog.choices}; this.persist(GUNPACKS, saved);
+            }
+        }
+        throw new Error('Too many conflicting resources. Check your installed gun packs.');
+    }
     remember() {
         const s = this.manager.state;
         this.closingAllowed = false;
@@ -145,7 +281,7 @@ class Controller {
         const defaults = saved.selected ? this.manager.draftForRow(saved.selected) : emptyDraft();
         const draft = {...defaults, ...saved.draft};
         for (const key of Object.keys(defaults)) {
-            if (typeof draft[key] !== typeof defaults[key]) return;
+            if (typeof draft[key] !== typeof defaults[key] || (Array.isArray(defaults[key]) && !Array.isArray(draft[key]))) return;
         }
         if (saved.selected) {
             const p = this.desktop.path;
@@ -167,10 +303,34 @@ class Controller {
         if (this.switching) return false;
         this.switching = true;
         try {
-            if (this.manager.state.dirty && !await confirmDiscard()) return false;
-            await callback();
+            let saved = false;
+            if (this.manager.state.dirty) {
+                const action = await confirmUnsaved();
+                if (this.disposed || action === 'cancel') return false;
+                if (action === 'save') {
+                    const view = {search: this.manager.state.search, rarityFilter: this.manager.state.rarityFilter, collectionFilter: this.manager.state.collectionFilter};
+                    if (!await this.saveWithPrefix()) return false;
+                    if (view.collectionFilter && !this.manager.collections().includes(view.collectionFilter)) view.collectionFilter = '';
+                    Object.assign(this.manager.state, view);
+                    saved = true;
+                }
+            }
+            if (this.disposed) return false;
+            await callback({saved});
             return true;
         } finally { this.switching = false; }
+    }
+    runTransition(callback) {
+        return this.run(() => this.transition(callback)).then(result => result === true);
+    }
+    freshRows(rows) {
+        return rows.map(row => {
+            const fresh = this.manager.state.rows.find(candidate => candidate.key === row.key && candidate.skin.id === row.skin.id)
+                || this.manager.state.rows.find(candidate => candidate.filename === row.filename && candidate.skin.id === row.skin.id)
+                || (this.manager.selected && this.manager.selected.key === row.key ? this.manager.selected : null);
+            if (!fresh) throw new Error('This skin is no longer available. Refresh Files before continuing.');
+            return fresh;
+        });
     }
     configure() {
         this.removeDialog('mcpskins_pack');
@@ -201,6 +361,7 @@ class Controller {
                     this.rememberRecentPack();
                     this.persist(PREFERENCES, {root: paths.root, theme: s.theme});
                     this.updatePreviews();
+                    this.loadGunPacks();
                 };
                 if (switching) return this.transition(apply);
                 apply();
@@ -240,20 +401,21 @@ class Controller {
         return promise;
     }
     select(row, event = {}) {
-        const rows = this.manager.selectionFor(row, event);
+        const rows = this.manager.selectionFor(row, event), anchor = this.manager.anchorKey;
         if (rows.length === this.manager.selection.length && rows.every(item => this.manager.state.selectedKeys.includes(item.key))) return;
-        return this.run(() => this.transition(() => {
-            if (!event.shiftKey || !this.manager.anchorKey) this.manager.anchorKey = row.key;
-            this.manager.selectRows(rows); this.remember(); this.updatePreviews();
-        }));
+        return this.runTransition(() => {
+            const fresh = this.freshRows(rows);
+            this.manager.anchorKey = event.shiftKey && anchor ? anchor : row.key;
+            this.manager.selectRows(fresh); this.remember(); this.updatePreviews();
+        });
     }
     selectAll() {
-        const rows = this.manager.state.ready ? this.manager.state.rows.slice() : [];
-        if (!rows.length) return;
-        return this.run(() => this.transition(() => {
-            this.manager.anchorKey = rows[0].key;
+        if (!this.manager.state.ready || !this.manager.state.rows.length) return;
+        return this.runTransition(() => {
+            const rows = this.manager.state.rows.slice();
+            this.manager.anchorKey = rows[0] ? rows[0].key : '';
             this.manager.selectRows(rows); this.remember(); this.updatePreviews();
-        }));
+        });
     }
     showShortcuts() {
         this.removeDialog('mcpskins_shortcuts');
@@ -261,19 +423,19 @@ class Controller {
         this.dialogs.add(dialog); dialog.show();
     }
     duplicateSkin(row) {
-        return this.run(() => this.transition(() => {
-            this.manager.duplicate(row); this.remember(); this.updatePreviews();
-        }));
+        return this.runTransition(() => {
+            this.manager.duplicate(this.freshRows([row])[0]); this.remember(); this.updatePreviews();
+        });
     }
     newSkin() {
         if (!this.manager.state.ready) return this.configure();
-        return this.run(() => this.transition(() => { this.manager.clear(); this.remember(); this.updatePreviews(); }));
+        return this.runTransition(() => { this.manager.clear(); this.remember(); this.updatePreviews(); });
     }
     refresh() {
         if (!this.manager.state.ready) return;
-        return this.run(() => this.transition(() => {
+        return this.runTransition(() => {
             this.manager.reload(); this.manager.state.notice = ''; this.loadMetadata(); this.remember(); this.updatePreviews();
-        }));
+        });
     }
     revert() {
         this.manager.revert(); this.manager.state.notice = ''; this.remember(); this.updatePreviews();
@@ -295,7 +457,7 @@ class Controller {
         this.updatePreviews();
         Blockbench.showQuickMessage(result.count ? `${result.count} skins saved` : `${result.id} saved to ${this.desktop.path.basename(result.filename)}`, 3500);
     }
-    resetColor() { this.edit('color', defaultColor(this.manager.state.draft.rarity)); }
+    resetColor() { this.edit('color', defaultColor(this.manager.state.draft.rarity, this.manager.state.rarities)); }
     pickColor() {
         this.removeDialog('mcpskins_color');
         const dialog = colorDialog(this.manager.state.draft.color || '#FFFFFF', color => this.edit('color', color));
@@ -312,6 +474,7 @@ class Controller {
     updatePreviews() {
         clearTimeout(this.timer);
         if (!this.manager.state.ready || this.disposed) return;
+        this.scheduleHealth();
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) { this.manager.state.previews = []; return; }
         try {
             this.manager.state.previews = previewCards(this.desktop.fs, this.manager.repository.paths,
@@ -320,15 +483,73 @@ class Controller {
     }
     openModel() {
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) return;
-        return this.run(() => {
-            const files = prepareSkin(this.desktop.fs, this.manager.repository.paths, this.manager.state.draft);
-            this.bridge.openModel(files, this.desktop.fs);
+        return this.run(async () => {
+            const repository = this.manager.repository, draft = this.manager.state.draft;
+            let files;
+            // Resolve all sources before copying. Source choices can be required for
+            // referenced textures as well as the primary gun/attachment definition.
+            for (let attempts = 0; attempts < 32; attempts++) {
+                let source;
+                try { source = await this.resolveGunPack(draft); }
+                catch (error) {
+                    // Existing/manual assets remain usable if a source pack was removed
+                    // or its display references are broken.
+                    try { files = prepareSkin(repository.fs, repository.paths, draft); }
+                    catch { throw error; }
+                    this.manager.state.notice = 'Using existing/manual assets. Gun-pack source: ' + error.message;
+                    break;
+                }
+                if (source === false || this.disposed || this.manager.repository !== repository || this.manager.state.draft !== draft) return;
+                try {
+                    if (source && typeof ModelProject !== 'undefined') {
+                        const selection = assetSelection(repository.paths, draft);
+                        const canonical = source.editorOnly ? this.desktop.path.join(selection.folder, selection.id + '.geo.json') : modelOutput(repository.paths, source.modelRef, selection.id);
+                        if (!repository.fs.existsSync(canonical)) {
+                            const {folder, id} = selection;
+                            const legacy = [this.desktop.path.join(folder, id + '.json'), this.desktop.path.join(folder, id + '.geo.json')];
+                            const open = ModelProject.all.find(project => legacy.some(file => this.bridge.same(file, project.export_path) || this.bridge.same(file, project.save_path)));
+                            if (open && (open.saved === false || (open.textures || []).some(texture => texture.saved === false))) throw new Error('Save the open model and its painted textures before migrating it to the MCPSkins geometry path.');
+                        }
+                    }
+                    files = prepareSkin(repository.fs, repository.paths, draft, source);
+                    if (source && !source.editorOnly) {
+                        try {
+                            const metadata = loadPackMetadata(repository.fs, repository.paths);
+                            if (metadata.weapon_models !== undefined && !isObject(metadata.weapon_models)) throw new Error('Pack weapon_models must be a JSON object.');
+                            const references = {...metadata.weapon_models, [modelKey(draft.weapon, draft.kind)]: source.modelRef};
+                            this.manager.state.packMetadata = metadata.weapon_models && metadata.weapon_models[modelKey(draft.weapon, draft.kind)] === source.modelRef
+                                ? metadata : savePackMetadata(repository.fs, repository.paths, {weapon_models: references});
+                            repository.paths.modelReferences = references;
+                        } catch (error) { for (const filename of files.created) repository.fs.unlinkSync(filename); throw error; }
+                    }
+                    if (source && source.editorOnly) this.manager.state.notice = 'LesRaisins geometry is an editing reference. MCPSkins applies texture and icon changes to these items.';
+                    break;
+                } catch (error) {
+                    if (!(error instanceof SourceConflict)) throw error;
+                    const choice = await new Promise(resolve => {
+                        const finish = value => { this.sourceRequests.delete(finish); resolve(value); };
+                        this.sourceRequests.add(finish);
+                        this.removeDialog('mcpskins_gunpack_source');
+                        const dialog = sourceDialog(error, finish); this.dialogs.add(dialog);
+                    });
+                    if (!choice || this.disposed || this.manager.repository !== repository || this.manager.state.draft !== draft) return;
+                    this.catalog.choices[error.resource] = choice;
+                    const saved = this.gunPackSettings(); saved.choices[this.catalog.directory] = {...this.catalog.choices}; this.persist(GUNPACKS, saved);
+                }
+            }
+            if (!files) throw new Error('Could not resolve gun-pack assets.');
+            this.bridge.openModel(files, repository.fs);
             this.updatePreviews();
         });
     }
     openFolder() {
-        if (this.manager.selection.length > 1) return;
-        return this.run(() => this.desktop.open(this.manager.repository.paths.textures(this.manager.state.draft.weapon), true));
+        if (!this.manager.state.ready || this.manager.selection.length > 1) return;
+        return this.run(() => {
+            const repository = this.manager.repository, folder = repository.paths.textures(this.manager.state.draft.weapon);
+            repository.fs.mkdirSync(folder, {recursive: true});
+            this.scheduleHealth();
+            return this.desktop.open(folder, true);
+        });
     }
     setStatus(row, status) {
         return this.run(() => {
@@ -338,28 +559,64 @@ class Controller {
             Blockbench.showQuickMessage(`${rows.length} skin${rows.length === 1 ? '' : 's'}: ${status === null ? 'status cleared' : STATUSES[status].label}`, 2500);
         });
     }
+    scheduleHealth() {
+        clearTimeout(this.healthTimer);
+        this.healthTimer = setTimeout(() => this.updateHealth(), 160);
+    }
+    updateHealth(force = false) {
+        if (this.disposed || !this.manager.state.ready || !this.manager.repository) return null;
+        const repository = this.manager.repository;
+        let stamp, report;
+        try {
+            stamp = healthSnapshot(repository.fs, repository.paths);
+            if (!force && this.healthRepository === repository && this.healthStamp === stamp && this.healthReport) return this.healthReport;
+            report = checkPack(repository.fs, repository.paths);
+            let metadata = {};
+            try { metadata = loadPackMetadata(repository.fs, repository.paths); } catch { /* The report already includes the metadata error. */ }
+            applyHealthIgnores(report, repository.paths, metadata);
+        } catch (error) {
+            report = {files: 0, skins: 0, issues: [{severity: 'error', message: 'Unable to check pack: ' + error.message,
+                filename: repository.paths.pack, registry: repository.paths.pack, rowKey: '', skinId: ''}]};
+        }
+        this.healthRepository = repository; this.healthStamp = stamp; this.healthReport = report;
+        this.manager.state.health = healthSummary(report);
+        return report;
+    }
+    setHealthIgnored(repository, issue, ignored) {
+        if (this.disposed || this.manager.repository !== repository) return Promise.resolve(null);
+        return this.run(() => {
+            const metadata = loadPackMetadata(repository.fs, repository.paths);
+            const keys = new Set(Array.isArray(metadata.ignored_health_issues) ? metadata.ignored_health_issues.filter(key => typeof key === 'string') : []);
+            const key = healthIssueKey(repository.paths, issue);
+            if (ignored) keys.add(key); else keys.delete(key);
+            this.manager.state.packMetadata = savePackMetadata(repository.fs, repository.paths, {ignored_health_issues: [...keys]});
+            return this.updateHealth(true);
+        });
+    }
     healthCheck() {
         if (!this.manager.state.ready) return;
         return this.run(() => {
             const repository = this.manager.repository, pack = repository.paths.pack;
-            const report = checkPack(repository.fs, repository.paths);
+            const report = this.updateHealth(true);
             this.removeDialog('mcpskins_health');
             const dialog = new Dialog('mcpskins_health', {
                 title: 'Pack Health Check', width: 780, buttons: ['Close'],
                 component: healthComponent(report, issue => {
                     if (this.disposed || this.manager.repository.paths.pack !== pack) return;
-                    return this.run(() => this.transition(() => {
+                    return this.runTransition(({saved}) => {
+                        const selected = this.manager.selected;
+                        const id = saved && selected && selected.key === issue.rowKey ? String(selected.skin.id ?? '') : issue.skinId;
                         this.manager.reload();
-                        const row = this.manager.state.rows.find(row => row.key === issue.rowKey && String(row.skin.id ?? '') === issue.skinId)
-                            || this.manager.state.rows.find(row => row.filename === issue.registry && String(row.skin.id ?? '') === issue.skinId);
+                        const row = this.manager.state.rows.find(row => row.key === issue.rowKey && String(row.skin.id ?? '') === id)
+                            || this.manager.state.rows.find(row => row.filename === issue.registry && String(row.skin.id ?? '') === id);
                         if (!row) throw new Error('This skin is no longer available. Run the health check again.');
                         Object.assign(this.manager.state, {search: '', rarityFilter: '', collectionFilter: ''});
                         this.manager.select(row); this.remember(); this.updatePreviews();
                         dialog.hide();
-                    }));
+                    });
                 }, issue => {
                     if (typeof Blockbench.showItemInFolder === 'function') Blockbench.showItemInFolder(issue.registry);
-                })
+                }, (issue, ignored) => this.setHealthIgnored(repository, issue, ignored))
             });
             this.dialogs.add(dialog);
             dialog.show();
@@ -409,8 +666,12 @@ class Controller {
         // Unload callbacks cannot veto a plugin reload; recovery is retained instead.
         if (this.manager.state.dirty) this.remember();
         this.disposed = true;
+        this.updates.dispose();
         this.cancelPrefixRequest();
+        this.sourceRequests.forEach(finish => finish(null)); this.sourceRequests.clear();
+        if (this.catalog) this.catalog.dispose();
         clearTimeout(this.timer);
+        clearTimeout(this.healthTimer); clearInterval(this.healthPoll); this.healthPoll = null;
         this.bridge.dispose();
         this.dialogs.forEach(dialog => { if (dialog.delete) dialog.delete(); else dialog.hide(); });
         this.dialogs.clear();
