@@ -103,6 +103,11 @@ const {RegistryRepository} = require("src/storage/registry.js");
 const {RarityRepository} = require("src/storage/rarity-editor.js");
 const {RarityEditor} = require("src/state/rarities.js");
 const {rarityComponent} = require("src/ui/rarities.js");
+const {CollectionRepository} = require("src/storage/collections.js");
+const {CollectionEditor} = require("src/state/collections.js");
+const {collectionComponent} = require("src/ui/collections.js");
+const {settingsComponent} = require("src/ui/settings.js");
+const {SETTINGS, settingsFrom} = require("src/domain/preferences.js");
 const {loadPackSettings, savePackSettings} = require("src/storage/settings.js");
 const {loadPackMetadata, savePackMetadata} = require("src/storage/pack-metadata.js");
 const {newPackPaths, createPack} = require("src/storage/new-pack.js");
@@ -113,9 +118,9 @@ const {checkPack} = require("src/assets/health.js");
 const {healthSnapshot, healthSummary, healthIssueKey, applyHealthIgnores} = require("src/assets/health-monitor.js");
 const {shortcutComponent} = require("src/ui/keyboard.js");
 const {healthComponent} = require("src/ui/health.js");
-const {GunPackCatalog, SourceConflict, modelKey, modelOutput} = require("src/gunpacks/catalog.js");
+const {GunPackCatalog, SourceConflict, modelKey} = require("src/gunpacks/catalog.js");
 const {gunPackDialog, sourceDialog, itemCounts, scanSummary} = require("src/ui/gunpacks.js");
-const {prepareSkin, assetSelection} = require("src/assets/preparation.js");
+const {prepareSkin, modelForEditing, assetSelection} = require("src/assets/preparation.js");
 const {previewCards} = require("src/assets/previews.js");
 const {Desktop} = require("src/integration/desktop.js");
 const {BlockbenchBridge} = require("src/integration/blockbench.js");
@@ -169,8 +174,12 @@ class Controller {
         }
         this.manager.state.weaponNames = sanitizeWeaponNames(this.getStored(WEAPON_NAMES));
         const preferences = this.getStored(PREFERENCES);
+        const storedSettings = this.getStored(SETTINGS);
+        const settings = settingsFrom(storedSettings);
+        if (!storedSettings && preferences && (preferences.theme === 'Blockbench' || Object.hasOwn(THEMES,preferences.theme))) settings.appearance.theme = preferences.theme;
+        this.manager.state.settings = settings;
+        this.manager.state.theme = settings.appearance.theme;
         if (!preferences) return;
-        this.manager.state.theme = preferences.theme === 'Blockbench' || Object.hasOwn(THEMES, preferences.theme) ? preferences.theme : 'Blockbench';
         if (!preferences.root) return;
         try {
             const connection = this.readRoot(preferences.root);
@@ -338,6 +347,31 @@ class Controller {
             };
             const dialog = new Dialog('mcpskins_rarities', {title: 'Pack Rarities', width: 1040, buttons: ['Close'], confirmIndex: 0, cancelIndex: 0,
                 component: rarityComponent(editor), onConfirm: close, onCancel: close});
+            this.dialogs.add(dialog); dialog.show(); return dialog;
+        });
+    }
+    openCollections() {
+        if (!this.manager.state.ready || this.disposed) return;
+        if (this.collectionEditor) {
+            const existing = [...this.dialogs].find(dialog => dialog.id === 'mcpskins_collections');
+            if (existing) { existing.show(); return existing; }
+        }
+        return this.runTransition(() => {
+            this.removeDialog('mcpskins_collections');
+            const repository = this.manager.repository;
+            const editor = new CollectionEditor(new CollectionRepository(repository.fs, repository.paths), this.manager.state.rarities,
+                () => confirmUnsaved({title:'Unsaved collection edits', message:'Save your collection changes before continuing?'}),
+                result => {
+                    if (result.renamed) this.manager.state.collectionFilter = '';
+                    this.manager.reload(); this.remember(); this.updatePreviews(); this.updateHealth(true);
+                }, () => !this.disposed && this.manager.repository === repository && !this.manager.state.dirty);
+            this.collectionEditor = editor;
+            const close = () => {
+                editor.guard(() => { dialog.hide(); if (this.collectionEditor === editor) this.collectionEditor = null; });
+                return false;
+            };
+            const dialog = new Dialog('mcpskins_collections', {title:'Pack Collections', width:1040, buttons:['Close'], confirmIndex:0, cancelIndex:0,
+                component:collectionComponent(editor), onConfirm:close, onCancel:close});
             this.dialogs.add(dialog); dialog.show(); return dialog;
         });
     }
@@ -522,6 +556,42 @@ class Controller {
             this.manager.selectRows(rows); this.remember(); this.updatePreviews();
         });
     }
+    updateSettings(section, key, value) {
+        if (this.disposed || !Object.hasOwn(this.manager.state.settings,section) || !Object.hasOwn(this.manager.state.settings[section],key)) return;
+        if (section === 'appearance' && key === 'theme') return this.changeTheme(value);
+        const settings = this.manager.state.settings;
+        this.manager.state.settings = settingsFrom({...settings,[section]:{...settings[section],[key]:value}});
+        this.persist(SETTINGS,this.manager.state.settings);
+        if (section === 'health') {
+            this.healthStamp = null;
+            if (this.manager.state.settings.health.live) this.updateHealth(true);
+            else this.manager.state.health = {...this.manager.state.health,status:'manual'};
+        }
+    }
+    async factoryReset() {
+        if (this.disposed || this.resetPending) return false;
+        this.resetPending = true;
+        try {
+            const answer = await new Promise(resolve => Blockbench.showMessageBox({title:'Factory Reset',
+                message:'This will reset all settings. Are you sure?', buttons:['Yes','Cancel'], confirm:0, cancel:1},resolve));
+            if (answer !== 0 || this.disposed) return false;
+            const settings = settingsFrom();
+            this.manager.state.settings = settings;
+            this.manager.state.theme = settings.appearance.theme;
+            this.persist(SETTINGS,settings);
+            this.persist(PREFERENCES,{root:this.manager.state.root,theme:settings.appearance.theme});
+            this.healthStamp = null;
+            this.updateHealth(true);
+            return true;
+        } finally { this.resetPending = false; }
+    }
+    showSettings() {
+        if (this.disposed) return;
+        this.removeDialog('mcpskins_settings');
+        const dialog = new Dialog('mcpskins_settings', {title:'Settings',width:760,buttons:[],
+            component:settingsComponent(this.manager.state,(section,key,value) => this.updateSettings(section,key,value),url => { if (!this.disposed) Blockbench.openLink(url); },() => this.factoryReset(),() => dialog.hide())});
+        this.dialogs.add(dialog); dialog.show(); return dialog;
+    }
     showShortcuts() {
         this.removeDialog('mcpskins_shortcuts');
         const dialog = new Dialog('mcpskins_shortcuts', {title: 'MCPSkins Keyboard Shortcuts', width: 700, buttons: ['Close'], component: shortcutComponent()});
@@ -580,16 +650,61 @@ class Controller {
         clearTimeout(this.timer);
         if (!this.manager.state.ready || this.disposed) return;
         this.scheduleHealth();
+        this.manager.state.customModel = false;
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) { this.manager.state.previews = []; return; }
+        try {
+            const draft = this.manager.state.draft;
+            const canonical = this.manager.repository.paths.modelForSkin(draft.weapon, assetSelection(this.manager.repository.paths, draft).id, draft.kind);
+            this.manager.state.customModel = !!canonical && this.desktop.fs.existsSync(canonical);
+        } catch { /* A new skin may not have an ID yet. */ }
         try {
             this.manager.state.previews = previewCards(this.desktop.fs, this.manager.repository.paths,
                 this.manager.state.draft, this.desktop.pathToFileURL);
         } catch (error) { this.manager.state.notice = `Preview unavailable: ${error.message}`; }
     }
-    openModel(frameTexture = null) {
+    toggleCustomModel() {
+        if (!this.manager.state.selectedKey || this.manager.state.dirty || this.manager.selection.length > 1) return;
+        if (!this.manager.state.customModel) return this.openModel(null, true);
+        return this.run(() => {
+            const repository = this.manager.repository, draft = this.manager.state.draft;
+            const {folder, id} = assetSelection(repository.paths, draft);
+            const model = repository.paths.modelForSkin(draft.weapon, id, draft.kind);
+            if (!model || !repository.fs.existsSync(model)) return;
+            const reference = this.desktop.path.join(folder, id + '.geo.json');
+            if (typeof ModelProject !== 'undefined' && ModelProject.all.some(project => [model,reference].some(file => this.bridge.same(project.export_path,file) || this.bridge.same(project.save_path,file)))) {
+                throw new Error('Save and close this skin\'s model projects before switching to the stock model.');
+            }
+            repository.fs.mkdirSync(folder, {recursive:true});
+            // Preserve both copies if a separate editing reference already exists.
+            let backup = null;
+            if (repository.fs.existsSync(reference)) {
+                const directory = repository.paths.inside(repository.paths.folder, '.mcpskins_manager', 'model_backups');
+                repository.fs.mkdirSync(directory, {recursive:true});
+                backup = this.desktop.path.join(directory,id + '.geo.json');
+                for (let number=2; repository.fs.existsSync(backup); number++) backup = this.desktop.path.join(directory,id + '_' + number + '.geo.json');
+                repository.fs.copyFileSync(reference,backup,1);
+            }
+            try {
+                repository.fs.copyFileSync(model,reference);
+                repository.fs.unlinkSync(model);
+            } catch (error) {
+                if (backup) repository.fs.copyFileSync(backup,reference);
+                throw error;
+            }
+            this.manager.state.notice = 'Stock geometry will be used in game. Your model is kept as an editing reference; Use Custom Model enables it again.';
+            this.updatePreviews();
+        });
+    }
+    openModel(frameTexture = null, customModel = false) {
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) return;
         return this.run(async () => {
             const repository = this.manager.repository, draft = this.manager.state.draft;
+            if (customModel && typeof ModelProject !== 'undefined') {
+                const {folder,id} = assetSelection(repository.paths,draft);
+                const references = [this.desktop.path.join(folder,id + '.json'),this.desktop.path.join(folder,id + '.geo.json')];
+                const open = ModelProject.all.find(project => references.some(file => this.bridge.same(file,project.export_path) || this.bridge.same(file,project.save_path)));
+                if (open && (open.saved === false || (open.textures || []).some(texture => texture.saved === false))) throw new Error('Save the open model and its painted textures before enabling custom geometry.');
+            }
             let files;
             // Resolve all sources before copying. Source choices can be required for
             // referenced textures as well as the primary gun/attachment definition.
@@ -599,7 +714,7 @@ class Controller {
                 catch (error) {
                     // Existing/manual assets remain usable if a source pack was removed
                     // or its display references are broken.
-                    try { files = prepareSkin(repository.fs, repository.paths, draft); }
+                    try { files = prepareSkin(repository.fs, repository.paths, draft, null, {customModel,...this.manager.state.settings.assets}); }
                     catch { throw error; }
                     this.manager.state.notice = 'Using existing/manual assets. Gun-pack source: ' + error.message;
                     break;
@@ -608,7 +723,7 @@ class Controller {
                 try {
                     if (source && typeof ModelProject !== 'undefined') {
                         const selection = assetSelection(repository.paths, draft);
-                        const canonical = source.editorOnly ? this.desktop.path.join(selection.folder, selection.id + '.geo.json') : modelOutput(repository.paths, source.modelRef, selection.id);
+                        const canonical = modelForEditing(repository.fs, repository.paths, draft, source, customModel);
                         if (!repository.fs.existsSync(canonical)) {
                             const {folder, id} = selection;
                             const legacy = [this.desktop.path.join(folder, id + '.json'), this.desktop.path.join(folder, id + '.geo.json')];
@@ -616,7 +731,7 @@ class Controller {
                             if (open && (open.saved === false || (open.textures || []).some(texture => texture.saved === false))) throw new Error('Save the open model and its painted textures before migrating it to the MCPSkins geometry path.');
                         }
                     }
-                    files = prepareSkin(repository.fs, repository.paths, draft, source);
+                    files = prepareSkin(repository.fs, repository.paths, draft, source, {customModel,...this.manager.state.settings.assets});
                     if (source && !source.editorOnly) {
                         try {
                             const metadata = loadPackMetadata(repository.fs, repository.paths);
@@ -780,12 +895,16 @@ class Controller {
     }
     updateHealth(force = false) {
         if (this.disposed || !this.manager.state.ready || !this.manager.repository) return null;
+        if (!force && !this.manager.state.settings.health.live) {
+            if (!this.healthReport || this.healthRepository !== this.manager.repository) this.manager.state.health = {...this.manager.state.health,status:'manual'};
+            return this.healthRepository === this.manager.repository ? this.healthReport : null;
+        }
         const repository = this.manager.repository;
         let stamp, report;
         try {
             stamp = healthSnapshot(repository.fs, repository.paths);
             if (!force && this.healthRepository === repository && this.healthStamp === stamp && this.healthReport) return this.healthReport;
-            report = checkPack(repository.fs, repository.paths);
+            report = checkPack(repository.fs, repository.paths, this.manager.state.settings.health);
             let metadata = {};
             try { metadata = loadPackMetadata(repository.fs, repository.paths); } catch { /* The report already includes the metadata error. */ }
             applyHealthIgnores(report, repository.paths, metadata);
@@ -852,6 +971,8 @@ class Controller {
     changeTheme(theme) {
         if (theme !== 'Blockbench' && !Object.hasOwn(THEMES, theme)) return;
         this.manager.state.theme = theme;
+        this.manager.state.settings = {...this.manager.state.settings,appearance:{...this.manager.state.settings.appearance,theme}};
+        this.persist(SETTINGS,this.manager.state.settings);
         this.persist(PREFERENCES, {root: this.manager.state.root, theme});
         if (theme !== 'Blockbench' && this.manager.state.ready) this.run(() => atomicJSON(this.desktop.fs,
             this.desktop.path.join(this.manager.state.root, 'skin_manager_theme.json'), {theme}));
@@ -902,6 +1023,7 @@ module.exports = {Controller};
 'use strict';
 const {rowStatus} = require("src/domain/status.js");
 const {defaultRarities, sortedRarities} = require("src/domain/rarities.js");
+const {settingsFrom} = require("src/domain/preferences.js");
 const {emptyDraft, draftFromRow, baseWeapon, defaultColor, weaponPrefix, equalJSON, itemKind, normalizedWeapon} = require("src/domain/skin.js");
 
 class Manager {
@@ -911,9 +1033,9 @@ class Manager {
         this.selection = [];
         this.anchorKey = '';
         this.duplicateSource = null;
-        this.state = {update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
+        this.state = {settings: settingsFrom(), update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
             gunPackItems: [], gunPackDirectory: '', gunPackMessage: '', gunPackWarnings: [], packMetadata: {title: 'Pack Name'}, directory: '', rows: [], selectedKey: '', selectedKeys: [], duplicatePending: false, mixed: {}, changedFields: [], draft: emptyDraft(), search: '', rarityFilter: '', collectionFilter: '',
-            health: {status: 'checking', errors: 0, warnings: 0}, rarities: defaultRarities(), sortColumn: 'gun', descending: false, missing: false, warnings: [], previews: [], notice: '', theme: 'Blockbench', weaponNames: {}};
+            health: {status: 'checking', errors: 0, warnings: 0}, customModel: false, rarities: defaultRarities(), sortColumn: 'gun', descending: false, missing: false, warnings: [], previews: [], notice: '', theme: 'Blockbench', weaponNames: {}};
     }
     attach(repository, result = repository.discover()) {
         this.repository = repository;
@@ -941,6 +1063,10 @@ class Manager {
         this.anchorKey = '';
         this.duplicateSource = null;
         const draft = emptyDraft();
+        if (active) {
+            Object.assign(draft,this.state.settings.defaults);
+            if (!Object.hasOwn(this.state.rarities,draft.rarity)) draft.rarity = 'common';
+        }
         draft.color = defaultColor(draft.rarity, this.state.rarities);
         Object.assign(this.state, {selectedKey: '', selectedKeys: [], duplicatePending: false, mixed: {}, changedFields: [], draft, dirty: false, active});
     }
@@ -1556,9 +1682,30 @@ function isDirectory(fs, filename) {
 module.exports = {readJSON, atomicJSON, isFile, isDirectory};
 
 },
+"src/domain/preferences.js": function(module, exports, require) {
+'use strict';
+const {THEMES} = require("src/domain/constants.js");
+const {isObject} = require("src/domain/skin.js");
+const SETTINGS = 'mcpskins_asset_manager.settings.v1';
+const themes = ['Blockbench', ...Object.keys(THEMES)];
+const PREVIEW_SIZES = {small:160, medium:256, large:384};
+function settingsFrom(value) {
+    const source = isObject(value) ? value : {};
+    const defaults = isObject(source.defaults) ? source.defaults : {}, appearance = isObject(source.appearance) ? source.appearance : {}, health = isObject(source.health) ? source.health : {};
+    const assets = isObject(source.assets) ? source.assets : {};
+    const text = key => typeof defaults[key] === 'string' ? defaults[key] : '';
+    const bool = (object,key,fallback) => typeof object[key] === 'boolean' ? object[key] : fallback;
+    return {defaults:{rarity:text('rarity') || 'common', collection:text('collection'), author:text('author'), is_new:bool(defaults,'is_new',true), unlocked:bool(defaults,'unlocked',false)},
+        assets:{createSpecular:bool(assets,'createSpecular',true),createNormal:bool(assets,'createNormal',true)},
+        appearance:{compact:bool(appearance,'compact',false), listHeight:Number.isFinite(appearance.listHeight) && appearance.listHeight >= 40 ? Math.min(1200,Math.round(appearance.listHeight)) : 0, previewSize:typeof appearance.previewSize === 'string' && Object.hasOwn(PREVIEW_SIZES,appearance.previewSize) ? appearance.previewSize : 'medium',theme:themes.includes(appearance.theme) ? appearance.theme : 'Blockbench'},
+        health:{live:bool(health,'live',true),missingHud:bool(health,'missingHud',true),missingIcon:bool(health,'missingIcon',true),missingMaps:bool(health,'missingMaps',true),collections:bool(health,'collections',true)}};
+}
+module.exports = {SETTINGS, themes, PREVIEW_SIZES, settingsFrom};
+
+},
 "src/version.js": function(module, exports, require) {
 'use strict';
-const VERSION = '1.3.0';
+const VERSION = '1.2.1';
 const PLUGIN_TITLE = 'MCPSkins Manager v' + VERSION;
 module.exports = {VERSION, PLUGIN_TITLE};
 
@@ -2768,8 +2915,20 @@ function copyMissing(fs, source, output, created) {
     }
 }
 
-function prepareSkin(fs, paths, draft, source = null) {
-    if (source) return prepareFromGunPack(fs, paths, draft, source);
+function modelForEditing(fs, paths, draft, source = null, custom = false) {
+    const {folder, id} = assetSelection(paths, draft);
+    const reference = paths.path.join(folder, id + '.geo.json');
+    if (source && source.editorOnly) {
+        if (custom) throw new Error('Custom geometry overrides are not supported for this item type.');
+        return reference;
+    }
+    const canonical = source ? modelOutput(paths, source.modelRef, id) : paths.modelForSkin(draft.weapon, id, draft.kind);
+    if (custom && !canonical) throw new Error('Scan the weapon source pack before enabling a custom model.');
+    return canonical && (custom || isFile(fs, canonical)) ? canonical : reference;
+}
+
+function prepareSkin(fs, paths, draft, source = null, options = {}) {
+    if (source) return prepareFromGunPack(fs, paths, draft, source, options);
     const {folder, gun, id} = assetSelection(paths, draft);
     const path = paths.path;
     if (!isDirectory(fs, folder)) throw new Error(`Texture folder does not exist: ${folder}`);
@@ -2797,15 +2956,22 @@ function prepareSkin(fs, paths, draft, source = null) {
     for (const [kind, suffix] of [['normal', '_n'], ['specular', '_s']]) {
         const output = path.join(folder, `${id}${suffix}.png`);
         const source = path.join(folder, `${gun}${suffix}.png`);
-        if (isFile(fs, source)) copyMissing(fs, source, output, created);
+        const enabled = kind === 'normal' ? options.createNormal !== false : options.createSpecular !== false;
+        if (enabled && isFile(fs, source)) copyMissing(fs, source, output, created);
         maps[kind] = isFile(fs, output) ? output : null;
+    }
+    if (options.customModel) {
+        const canonical = modelForEditing(fs, paths, draft, null, true);
+        fs.mkdirSync(path.dirname(canonical), {recursive:true});
+        copyMissing(fs, model, canonical, created);
+        model = canonical;
     }
     return {model, texture, ...maps, created};
 }
 
-function prepareFromGunPack(fs, paths, draft, source) {
+function prepareFromGunPack(fs, paths, draft, source, options = {}) {
     const {folder, gun, id} = assetSelection(paths, draft), path = paths.path;
-    const model = source.editorOnly ? path.join(folder, id + '.geo.json') : modelOutput(paths, source.modelRef, id);
+    const model = modelForEditing(fs, paths, draft, source, !!options.customModel);
     const texture = path.join(folder, id + '.png');
     const pending = [];
     const add = (filename, read) => {
@@ -2827,6 +2993,7 @@ function prepareFromGunPack(fs, paths, draft, source) {
         return isFile(fs, legacy) ? fs.readFileSync(legacy) : source.texture();
     });
     for (const [kind, suffix] of [['normal', '_n'], ['specular', '_s'], ['icon', '_icon'], ['hud', '_hud'], ['hud_empty', '_hud_empty'], ['lod', '_lod']]) {
+        if ((kind === 'normal' && options.createNormal === false) || (kind === 'specular' && options.createSpecular === false)) continue;
         if (draft.kind !== 'gun' && kind.startsWith('hud')) continue;
         add(path.join(folder, id + suffix + '.png'), () => {
             const legacy = path.join(folder, gun + suffix + '.png');
@@ -2875,7 +3042,7 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     return created;
 }
 
-module.exports = {assetSelection, modelForWeapon, prepareSkin, duplicateAssets};
+module.exports = {assetSelection, modelForWeapon, modelForEditing, prepareSkin, duplicateAssets};
 
 },
 "src/storage/rarities.js": function(module, exports, require) {
@@ -3139,6 +3306,439 @@ function rarityComponent(editor) {
 module.exports = {rarityComponent};
 
 },
+"src/storage/collections.js": function(module, exports, require) {
+'use strict';
+const {readJSON, atomicJSON, isDirectory} = require("src/storage/files.js");
+const {isObject, clone, equalJSON, BASE_KEYS, slugify} = require("src/domain/skin.js");
+const {collectionKey, validateCase, effectiveCase, caseOdds, buildCase} = require("src/domain/collections.js");
+
+function createJSON(fs, filename, data) {
+    const temporary = filename + '.tmp';
+    let owned = false;
+    try {
+        fs.writeFileSync(temporary, JSON.stringify(data,null,2) + '\n', {encoding:'utf8',flag:'wx'});
+        owned = true;
+        // COPYFILE_EXCL is 1; Blockbench's scoped filesystem does not expose constants.
+        fs.copyFileSync(temporary,filename,1);
+    } finally { if (owned) fs.unlinkSync(temporary); }
+}
+
+function scanCollections(fs, paths) {
+    const definitions = new Map(), members = new Map(), registries = [], issues = [];
+    const root = paths.path.join(paths.pack, 'data');
+    const warn = (filename, message, severity = 'error') => issues.push({filename, message, severity});
+    const walk = (directory, visit, depth = 0) => {
+        if (!isDirectory(fs, directory)) return;
+        if (depth > 16) throw new Error('Collection data folders are nested too deeply.');
+        for (const entry of fs.readdirSync(directory, {withFileTypes: true}).sort((a,b) => a.name.localeCompare(b.name))) {
+            const filename = paths.path.join(directory, entry.name);
+            if (entry.isDirectory()) walk(filename, visit, depth + 1);
+            else if (entry.isFile() && entry.name.endsWith('.json')) {
+                try { visit(filename, readJSON(fs, filename)); } catch (error) { warn(filename, error.message); }
+            }
+        }
+    };
+    if (isDirectory(fs, root)) for (const namespace of fs.readdirSync(root, {withFileTypes:true}).filter(entry => entry.isDirectory())) {
+        const base = paths.path.join(root, namespace.name);
+        for (const folder of ['collection_cases', 'skins']) try {
+            walk(paths.path.join(base, folder), (filename, data) => {
+                if (folder === 'collection_cases') {
+                    validateCase(data);
+                    const key = collectionKey(data.collection), definition = {filename, data};
+                    if (!definitions.has(key)) definitions.set(key, []);
+                    definitions.get(key).push(definition);
+                } else if (isObject(data) && Object.values(BASE_KEYS).some(key => Object.hasOwn(data,key))) {
+                    if (!Array.isArray(data.skins)) throw new Error('Registry skins must be a list.');
+                    registries.push({filename, data});
+                    for (const skin of data.skins) if (isObject(skin) && typeof skin.collection === 'string' && skin.collection.trim() && !String(skin.id).startsWith('default:')) {
+                        const key = collectionKey(skin.collection);
+                        if (!members.has(key)) members.set(key, []);
+                        members.get(key).push({skin, filename});
+                    }
+                }
+            });
+        } catch (error) { warn(paths.path.join(base, folder), error.message); }
+    }
+    for (const [key, entries] of definitions) if (entries.length > 1) for (const entry of entries) warn(entry.filename, 'Multiple case definitions target collection "' + key + '". Resolve the duplicate files before editing.');
+    const keys = new Set(['*', ...members.keys(), ...definitions.keys()]);
+    const rows = [...keys].map(key => {
+        const definition = definitions.get(key)?.[0], skins = members.get(key) || [];
+        return {key, name: definition ? definition.data.collection : skins[0]?.skin.collection.trim() || '*', filename: definition?.filename || '',
+            data: definition?.data || {}, duplicate: (definitions.get(key)?.length || 0) > 1, members: skins,
+            count: skins.length, title: definition?.data.title || ''};
+    }).sort((a,b) => a.key === '*' ? -1 : b.key === '*' ? 1 : a.name.localeCompare(b.name));
+    return {rows, definitions, registries, issues};
+}
+function collectionIssues(scan) {
+    const issues = [...scan.issues];
+    if (!scan.definitions.size) return issues;
+    const global = scan.definitions.get('*')?.[0]?.data || {};
+    const ids = new Set(scan.registries.flatMap(record => record.data.skins.filter(isObject).map(skin => skin.id)));
+    for (const row of scan.rows) {
+        if (row.key === '*') continue;
+        const settings = effectiveCase(global, row.data), odds = caseOdds(row.members.map(member => member.skin), settings);
+        const filename = row.filename || scan.definitions.get('*')?.[0]?.filename;
+        if (!filename) continue;
+        const add = message => issues.push({filename, severity:'warning', message: row.name + ': ' + message});
+        if (!odds.eligible) add('Case has no eligible rewards with positive rarity weights.');
+        for (const tier of odds.tiers) if (!tier.weight) add('Rarity "' + tier.rarity + '" has no positive case weight.');
+    }
+    for (const entries of scan.definitions.values()) for (const entry of entries) {
+        for (const id of entry.data.excluded_skins || []) if (!ids.has(id)) issues.push({filename:entry.filename, severity:'warning', message:'Excluded skin does not exist in this pack: ' + id + '. It may belong to another installed pack.'});
+    }
+    return issues;
+}
+class CollectionRepository {
+    constructor(fs, paths) { this.fs = fs; this.paths = paths; }
+    scan() { return scanCollections(this.fs, this.paths); }
+    save(draft, selected, baseline) {
+        const current = this.scan(), data = buildCase(draft, selected?.data || {}), key = collectionKey(data.collection);
+        const oldKey = selected?.key, renaming = selected && key !== oldKey;
+        if (selected?.duplicate || current.definitions.get(oldKey)?.length > 1) throw new Error('Resolve duplicate collection case definitions before saving.');
+        if (selected && (oldKey === '*') !== (key === '*')) throw new Error('Global Defaults cannot be renamed into a collection or vice versa.');
+        if ((!selected || renaming) && current.rows.some(row => row.key === key)) throw new Error('That collection already exists. Select it in the list to edit it.');
+        const old = oldKey && current.definitions.get(oldKey)?.[0];
+        if (selected?.filename ? !old || old.filename !== selected.filename || !equalJSON(old.data, selected.data) : old) throw new Error('This collection changed on disk. Close and reopen Collections before saving.');
+        const rename = selected && data.collection !== selected.name;
+        if (rename && current.issues.some(issue => issue.severity === 'error')) throw new Error('Resolve collection or registry scan errors before renaming a collection.');
+        if (rename && !equalJSON(current.rows.find(row => row.key === oldKey)?.members || [], selected.members)) throw new Error('Collection skins changed on disk. Close and reopen Collections before renaming.');
+        if (rename && baseline && !equalJSON(current.registries, baseline.registries)) throw new Error('Skin registries changed on disk. Close and reopen Collections before renaming.');
+        const directory = this.paths.inside(this.paths.folder, 'data', this.paths.namespace, 'collection_cases');
+        let filename = selected?.filename;
+        if (!filename) {
+            this.fs.mkdirSync(directory, {recursive:true});
+            const stem = key === '*' ? 'defaults' : slugify(data.collection) || 'collection';
+            filename = this.paths.path.join(directory, stem + '.json');
+            for (let suffix = 2; this.fs.existsSync(filename); suffix++) filename = this.paths.path.join(directory, stem + '_' + suffix + '.json');
+        }
+        const writes = [];
+        if (rename) for (const record of current.registries) {
+            const changed = clone(record.data); let count = 0;
+            for (const skin of changed.skins) if (isObject(skin) && collectionKey(skin.collection) === oldKey) { skin.collection = data.collection; count++; }
+            if (count) writes.push({filename:record.filename, data:changed, original:record.data});
+        }
+        writes.push({filename, data, original:selected?.filename ? selected.data : null});
+        const written = [];
+        try {
+            for (const write of writes) {
+                if (write.original === null) createJSON(this.fs,write.filename,write.data);
+                else {
+                    if (!equalJSON(readJSON(this.fs,write.filename),write.original)) throw new Error('A file changed on disk before saving. Reopen Collections.');
+                    atomicJSON(this.fs,write.filename,write.data);
+                }
+                written.push(write);
+            }
+        } catch (error) {
+            const failures = [];
+            for (const write of written.reverse()) try {
+                if (!equalJSON(readJSON(this.fs,write.filename),write.data)) throw new Error('Changed externally');
+                if (write.original === null) this.fs.unlinkSync(write.filename); else atomicJSON(this.fs,write.filename,write.original);
+            } catch { failures.push(write.filename); }
+            throw new Error(error.message + (failures.length ? ' Could not restore: ' + failures.join(', ') : ''));
+        }
+        return {key, filename, renamed:rename};
+    }
+}
+module.exports = {scanCollections, collectionIssues, CollectionRepository};
+
+},
+"src/domain/collections.js": function(module, exports, require) {
+'use strict';
+const {clone, isObject} = require("src/domain/skin.js");
+const collectionKey = value => String(value || '').trim().toLowerCase();
+const CASE_DEFAULTS = {price: 100, case_color: '#FFFFFF', requiresKey: true,
+    rarity_weights: {common: 55, uncommon: 27, rare: 12, epic: 5, legendary: 1}, excluded_skins: []};
+const TEXT_FIELDS = ['title', 'description', 'shop_icon'];
+function validateCase(data) {
+    if (!isObject(data) || typeof data.collection !== 'string' || !data.collection.trim()) throw new Error('A collection name is required.');
+    for (const key of TEXT_FIELDS) if (data[key] !== undefined && typeof data[key] !== 'string') throw new Error(key + ' must be text.');
+    if (data.price !== undefined && (!Number.isInteger(data.price) || data.price < 0 || data.price > 2147483647)) throw new Error('Price must be a whole number from 0 to 2147483647.');
+    if (data.case_color !== undefined && (typeof data.case_color !== 'string' || !/^#?[a-f0-9]{6}$/i.test(data.case_color))) throw new Error('Case color must use #RRGGBB.');
+    if (data.requiresKey !== undefined && typeof data.requiresKey !== 'boolean') throw new Error('requiresKey must be true or false.');
+    if (data.shop_icon && !/^(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+$/.test(data.shop_icon)) throw new Error('Shop icon must be a resource texture ID.');
+    if (data.rarity_weights !== undefined && (!isObject(data.rarity_weights) || Object.entries(data.rarity_weights).some(([key, value]) => !key.trim() || !Number.isInteger(value) || value < 0 || value > 2147483647))) throw new Error('Rarity weights must be nonnegative whole numbers.');
+    if (data.excluded_skins !== undefined && (!Array.isArray(data.excluded_skins) || data.excluded_skins.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('Excluded skins must be a list of skin IDs.');
+    return data;
+}
+function effectiveCase(global = {}, specific = {}) {
+    const result = clone(CASE_DEFAULTS);
+    for (const data of [global, specific]) {
+        for (const key of ['price', 'case_color', 'requiresKey', ...TEXT_FIELDS]) {
+            if (data[key] !== undefined && (typeof data[key] !== 'string' || data[key].trim())) result[key] = data[key];
+        }
+        for (const [key, value] of Object.entries(data.rarity_weights || {})) result.rarity_weights[key.toLowerCase()] = value;
+        result.excluded_skins = [...new Set([...result.excluded_skins, ...(data.excluded_skins || [])])];
+    }
+    return result;
+}
+function caseOdds(skins, settings) {
+    const excluded = new Set(settings.excluded_skins), groups = new Map();
+    for (const skin of skins) {
+        if (excluded.has(skin.id) || String(skin.id).startsWith('default:')) continue;
+        const rarity = String(skin.rarity || 'common').toLowerCase();
+        if (!groups.has(rarity)) groups.set(rarity, []);
+        groups.get(rarity).push(skin);
+    }
+    const tiers = [...groups].map(([rarity, members]) => ({rarity, members, weight: Object.hasOwn(settings.rarity_weights,rarity) ? settings.rarity_weights[rarity] : 0}));
+    const total = tiers.reduce((sum, tier) => sum + tier.weight, 0);
+    return {total, eligible: tiers.filter(tier => tier.weight > 0).reduce((sum, tier) => sum + tier.members.length, 0),
+        tiers: tiers.map(tier => {
+            const chance = total ? tier.weight / total : 0;
+            const weights = tier.members.map(skin => Math.max(1, Number.isSafeInteger(skin.weight) ? skin.weight : 1));
+            const skinTotal = weights.reduce((a, b) => a + b, 0);
+            return {rarity: tier.rarity, weight: tier.weight, chance, count: tier.members.length,
+                skins: tier.members.map((skin, index) => ({id: skin.id, name: skin.name || skin.id, chance: chance * weights[index] / skinTotal}))};
+        })};
+}
+function caseDraft(row, rarities) {
+    const data = row ? row.data : {};
+    return {collection: row ? row.name : '', title: data.title || '', description: data.description || '',
+        price: data.price === undefined ? '' : String(data.price), case_color: data.case_color || '', shop_icon: data.shop_icon || '',
+        requiresKey: data.requiresKey === undefined ? '' : String(data.requiresKey),
+        weights: [...new Set([...Object.keys(rarities), ...Object.keys(data.rarity_weights || {})])].map(id => ({id, value: data.rarity_weights?.[id] === undefined ? '' : String(data.rarity_weights[id])})),
+        exclusions: (data.excluded_skins || []).join('\n')};
+}
+function buildCase(draft, previous = {}) {
+    const data = {...clone(previous), collection: draft.collection.trim()};
+    for (const key of [...TEXT_FIELDS, 'case_color']) { if (draft[key].trim()) data[key] = draft[key].trim(); else delete data[key]; }
+    const integer = (value, label) => { if (!/^[0-9]+$/.test(value.trim())) throw new Error(label + ' must be a nonnegative whole number.'); return Number(value); };
+    if (draft.price.trim()) data.price = integer(draft.price, 'Price'); else delete data.price;
+    if (draft.requiresKey === '') delete data.requiresKey; else if (['true', 'false'].includes(draft.requiresKey)) data.requiresKey = draft.requiresKey === 'true'; else throw new Error('Choose a key requirement.');
+    const weights = Object.create(null);
+    for (const row of draft.weights) if (row.value.trim()) weights[row.id] = integer(row.value, 'Rarity weight');
+    if (Object.keys(weights).length) data.rarity_weights = weights; else delete data.rarity_weights;
+    const exclusions = [...new Set(draft.exclusions.split(/[\r\n,]+/).map(id => id.trim()).filter(Boolean))];
+    if (exclusions.length) data.excluded_skins = exclusions; else delete data.excluded_skins;
+    return validateCase(data);
+}
+module.exports = {collectionKey, CASE_DEFAULTS, validateCase, effectiveCase, caseOdds, caseDraft, buildCase};
+
+},
+"src/state/collections.js": function(module, exports, require) {
+'use strict';
+const {caseDraft, buildCase, effectiveCase, caseOdds, collectionKey} = require("src/domain/collections.js");
+const {collectionIssues} = require("src/storage/collections.js");
+class CollectionEditor {
+    constructor(repository, rarities, confirm, saved, active = () => true) {
+        Object.assign(this, {repository, rarities, confirm, saved, active, selected:null});
+        this.state = {rows:[], warnings:[], search:'', selectedKey:'', active:false, draft:caseDraft(null,rarities), dirty:false, busy:false, error:'', notice:''};
+        this.load();
+    }
+    load(key = '') {
+        this.scan = this.repository.scan();
+        this.availableRarities = {...this.rarities};
+        for (const id of Object.keys(this.scan.definitions.get('*')?.[0]?.data.rarity_weights || {})) {
+            if (!Object.hasOwn(this.availableRarities,id)) this.availableRarities[id] = {id};
+        }
+        this.state.rows = this.scan.rows;
+        this.state.warnings = collectionIssues(this.scan).map(issue => issue.message);
+        if (key) this.pick(this.scan.rows.find(row => row.key === key));
+    }
+    pick(row) {
+        this.selected = row || null;
+        Object.assign(this.state, {selectedKey:row?.key || '', active:!!row, draft:caseDraft(row,this.availableRarities), dirty:false,error:'',notice:''});
+    }
+    async guard(action) {
+        if (this.state.busy) return false;
+        this.state.busy = true;
+        try {
+            if (this.state.dirty) {
+                const choice = await this.confirm();
+                if (choice === 'cancel' || (choice === 'save' && !this.save())) return false;
+            }
+            action(); return true;
+        } finally { this.state.busy = false; }
+    }
+    select(key) { return this.guard(() => this.pick(this.state.rows.find(row => row.key === key))); }
+    create() { return this.guard(() => { this.pick(null); this.state.active = true; }); }
+    edit(key,value) { this.state.draft[key] = value; Object.assign(this.state,{dirty:true,error:'',notice:''}); }
+    weight(index,value) { this.edit('weights',this.state.draft.weights.map((row,i) => i === index ? {...row,value} : row)); }
+    exclude(id,checked) {
+        const ids = new Set(this.state.draft.exclusions.split(/[\r\n,]+/).map(value => value.trim()).filter(Boolean));
+        if (checked) ids.add(id); else ids.delete(id);
+        this.edit('exclusions',[...ids].join('\n'));
+    }
+    preview() {
+        try {
+            const data = buildCase(this.state.draft,this.selected?.data || {}), key = collectionKey(data.collection);
+            const global = this.scan.definitions.get('*')?.[0]?.data || {};
+            const settings = effectiveCase(key === '*' ? {} : global,data);
+            const members = this.selected?.members || this.scan.rows.find(row => row.key === key)?.members || [];
+            return {settings, odds:caseOdds(members.map(member => member.skin),settings), error:''};
+        } catch (error) { return {settings:null,odds:null,error:error.message}; }
+    }
+    discard() { if (this.selected) this.pick(this.selected); else { this.pick(null); this.state.active = true; } }
+    save() {
+        try {
+            if (!this.active()) throw new Error('The selected pack changed or has unsaved skin edits. Save those edits and reopen Collections.');
+            const result = this.repository.save(this.state.draft,this.selected,this.scan);
+            this.load(result.key); this.saved(result); this.state.notice = result.renamed ? 'Collection and matching skin entries renamed.' : 'Collection saved.';
+            return true;
+        } catch(error) { this.state.error = error.message; return false; }
+    }
+}
+module.exports = {CollectionEditor};
+
+},
+"src/ui/collections.js": function(module, exports, require) {
+'use strict';
+function collectionComponent(editor) {
+    return {
+        data() { return {c:editor.state}; },
+        computed: {
+            rows() { const term=this.c.search.trim().toLowerCase(); return this.c.rows.filter(row => (row.name+' '+row.title).toLowerCase().includes(term)); },
+            preview() { return editor.preview(); },
+            selected() { return this.c.rows.find(row => row.key === this.c.selectedKey); },
+            members() { return this.selected?.members || []; },
+            global() { return this.c.selectedKey === '*'; },
+            previewColor() { return '#' + String(this.c.draft.case_color || this.preview.settings?.case_color || '#FFFFFF').replace(/^#/, ''); },
+            excluded() { return this.c.draft.exclusions.split(/[\r\n,]+/).map(id => id.trim()); },
+            inheritedExclusions() { return this.global ? [] : editor.scan.definitions.get('*')?.[0]?.data.excluded_skins || []; }
+        },
+        methods: {
+            select(key) { return editor.select(key); }, create() { return editor.create(); }, save() { return editor.save(); }, discard() { editor.discard(); },
+            edit(key,event) { editor.edit(key,event.target.value); }, weight(index,event) { editor.weight(index,event.target.value); },
+            exclude(id,event) { editor.exclude(id,event.target.checked); }, percent(value) { return (value*100).toFixed(2)+'%'; }
+        },
+        template: `<section class="mcpskins-rarity-manager mcpskins-collections">
+            <p class="mcpskins-rarity-muted">Collection Cases settings for this pack. Blank fields inherit Global Defaults, then the addon's defaults. Save and use /reload in game.</p>
+            <details v-if="c.warnings.length"><summary>{{c.warnings.length}} collection issue(s)</summary><p v-for="(warning,index) in c.warnings" :key="index">{{warning}}</p></details>
+            <div class="mcpskins-rarity-layout"><section class="mcpskins-rarity-browser" aria-label="Collection list">
+                <div class="mcpskins-rarity-toolbar"><input type="search" v-model="c.search" placeholder="Search collections..." aria-label="Search collections"><button type="button" :disabled="c.busy" @click="create">New Collection</button></div>
+                <div class="mcpskins-rarity-scroll"><table><thead><tr><th>Collection</th><th>Skins</th><th>Settings</th></tr></thead><tbody>
+                    <tr v-for="row in rows" :key="row.key" :class="{selected:c.selectedKey===row.key}" tabindex="0" :aria-selected="c.selectedKey===row.key" @click="select(row.key)" @keydown.enter.prevent="select(row.key)" @keydown.space.prevent="select(row.key)"><td>{{row.key==='*' ? 'Global Defaults' : row.name}}</td><td>{{row.key==='*' ? '-' : row.count}}</td><td>{{row.filename ? 'Pack' : 'Inherited'}}</td></tr>
+                </tbody></table></div>
+            </section><section class="mcpskins-rarity-inspector" aria-label="Collection inspector">
+                <h3>{{global ? 'Global Defaults' : 'Collection Inspector'}} <span v-if="c.dirty" class="mcpskins-rarity-muted">Unsaved</span></h3>
+                <p v-if="!c.active" class="mcpskins-rarity-muted">Select a collection or click New Collection.</p>
+                <form v-else @submit.prevent="save" @keydown.enter.stop>
+                    <p v-if="global" class="mcpskins-rarity-muted">Global Defaults (*) apply to every collection across all loaded packs.</p>
+                    <p v-if="selected && selected.filename" class="mcpskins-rarity-path mcpskins-rarity-muted">{{selected.filename}}</p>
+                    <label v-if="!global">Collection name<input :value="c.draft.collection" @input="edit('collection',$event)" placeholder="Collection One"><small class="mcpskins-rarity-muted">Changing this name also updates matching skin entries throughout this pack. Other installed packs may share this collection.</small></label>
+                    <label>Display title<input :value="c.draft.title" @input="edit('title',$event)" :placeholder="preview.settings && preview.settings.title || '(Inherited)'"></label>
+                    <label>Description<textarea rows="3" :value="c.draft.description" @input="edit('description',$event)" :placeholder="preview.settings && preview.settings.description || '(Inherited)'"></textarea></label>
+                    <label>Case price<input type="number" min="0" max="2147483647" step="1" :value="c.draft.price" @input="edit('price',$event)" :placeholder="preview.settings ? String(preview.settings.price) : '(Inherited)'"><small class="mcpskins-rarity-muted">Configured currency units. 0 disables purchasing; blank inherits the default.</small></label>
+                    <label>Case color<div class="mcpskins-rarity-color"><input type="color" :value="previewColor" @input="edit('case_color',$event)" aria-label="Choose case color"><input :value="c.draft.case_color" @input="edit('case_color',$event)" :placeholder="preview.settings && preview.settings.case_color || '#FFFFFF'" aria-label="Case color hex"></div></label>
+                    <label>Shop icon<input :value="c.draft.shop_icon" @input="edit('shop_icon',$event)" placeholder="my_pack:textures/gui/case.png"><small class="mcpskins-rarity-muted">The texture must be supplied to clients through a resource pack or mod.</small></label>
+                    <details class="mcpskins-collection-advanced"><summary>Advanced</summary>
+                        <label>Requires key<select :value="c.draft.requiresKey" @change="edit('requiresKey',$event)"><option value="">Inherit ({{preview.settings && preview.settings.requiresKey ? 'Yes' : 'No'}})</option><option value="true">Yes</option><option value="false">No</option></select><small class="mcpskins-rarity-muted">The server's global key setting also applies.</small></label>
+                        <h4>Rarity weights</h4><p class="mcpskins-rarity-muted">Relative chances; 0 excludes a tier. Blank inherits. Empty tiers do not participate.</p>
+                        <label v-for="(row,index) in c.draft.weights" :key="row.id">{{row.id}}<input type="number" min="0" max="2147483647" step="1" :value="row.value" @input="weight(index,$event)" :placeholder="preview.settings ? String(preview.settings.rarity_weights[row.id] || 0) : '0'"></label>
+                        <h4>Excluded skins</h4><p class="mcpskins-rarity-muted">Inherited exclusions cannot be removed here; edit Global Defaults to change them.</p>
+                        <label v-for="member in members" :key="member.filename+'|'+member.skin.id" class="mcpskins-rarity-check"><input type="checkbox" :checked="excluded.includes(member.skin.id) || inheritedExclusions.includes(member.skin.id)" :disabled="inheritedExclusions.includes(member.skin.id)" @change="exclude(member.skin.id,$event)">{{member.skin.name || member.skin.id}}</label>
+                        <label>Excluded skin IDs<textarea rows="3" :value="c.draft.exclusions" @input="edit('exclusions',$event)" placeholder="One skin ID per line"></textarea></label>
+                    </details>
+                    <details v-if="!global && preview.odds" open class="mcpskins-collection-odds"><summary>Odds Preview</summary>
+                        <p class="mcpskins-rarity-muted">{{preview.odds.eligible}} eligible skin(s). Based on saved skins in this pack; other installed packs can change the odds. Skin weights also affect individual chances.</p>
+                        <p v-if="!preview.odds.total" class="mcpskins-health-warning">This case has no eligible rewards.</p>
+                        <div v-for="tier in preview.odds.tiers" :key="tier.rarity"><strong>{{tier.rarity.charAt(0).toUpperCase() + tier.rarity.slice(1)}}: {{percent(tier.chance)}}</strong><details><summary>{{tier.count}} skin(s)</summary><p v-for="skin in tier.skins" :key="skin.id">{{skin.name}}: {{percent(skin.chance)}}</p></details></div>
+                    </details>
+                    <p v-if="preview.error" class="mcpskins-rarity-muted">{{preview.error}}</p><p v-if="c.error" role="alert" class="mcpskins-health-error">{{c.error}}</p><p v-if="c.notice" role="status">{{c.notice}}</p>
+                    <div class="mcpskins-rarity-actions"><button type="submit" :disabled="c.busy || selected && selected.duplicate">Save Collection</button><button type="button" :disabled="c.busy" @click="discard">Discard Changes</button></div>
+                </form>
+            </section></div>
+        </section>`
+    };
+}
+module.exports = {collectionComponent};
+
+},
+"src/ui/settings.js": function(module, exports, require) {
+'use strict';
+const {themes} = require("src/domain/preferences.js");
+const {sortedRarities} = require("src/domain/rarities.js");
+const {helpComponent} = require("src/ui/help.js");
+function settingsComponent(state, change, open, reset, close) {
+    return {
+        components:{'help-links':helpComponent(open,undefined,false)},
+        data() { return {s:state,tab:'general',themes}; },
+        computed:{
+            rarities() { const values=sortedRarities(this.s.rarities); const current=this.s.settings.defaults.rarity;
+                return values.some(row=>row.id===current) ? values : [...values,{id:current,name:current+' (not in this pack)'}]; }
+        },
+        methods:{edit(section,key,event) { change(section,key,event.target.type==='checkbox' ? event.target.checked : event.target.value); }, reset() { return reset(); }, close() { return close(); }},
+        template:`<section class="mcpskins-settings">
+            <div class="mcpskins-settings-layout">
+                <nav class="mcpskins-settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
+                    <button v-for="item in [{id:'general',label:'General'},{id:'appearance',label:'Appearance'},{id:'debug',label:'Debug'}]" :key="item.id" :id="'mcpskins-settings-tab-'+item.id" type="button" role="tab" :aria-selected="tab===item.id" :aria-controls="'mcpskins-settings-panel-'+item.id" :class="{selected:tab===item.id}" @click="tab=item.id">{{item.label}}</button>
+                </nav>
+                <div class="mcpskins-settings-content">
+                    <section v-show="tab==='general'" id="mcpskins-settings-panel-general" role="tabpanel" aria-labelledby="mcpskins-settings-tab-general">
+                        <details class="mcpskins-settings-defaults"><summary>Defaults</summary><p>Applied to new skin entries. Existing skins and unsaved edits are kept as they are.</p>
+                        <label>Rarity<select :value="s.settings.defaults.rarity" @change="edit('defaults','rarity',$event)"><option v-for="row in rarities" :key="row.id" :value="row.id">{{row.name}}</option></select><small>If this tier is unavailable in a pack, new skins use Common.</small></label>
+                        <label>Collection<input :value="s.settings.defaults.collection" @input="edit('defaults','collection',$event)" placeholder="(Optional)"></label>
+                        <label>Skin author<input :value="s.settings.defaults.author" @input="edit('defaults','author',$event)" placeholder="(Optional)"></label>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.defaults.is_new" @change="edit('defaults','is_new',$event)">Mark as new</label>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.defaults.unlocked" @change="edit('defaults','unlocked',$event)">Unlocked by Default</label>
+                        </details>
+                        <section class="mcpskins-settings-assets"><h3>Assets</h3>
+                            <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.assets.createSpecular" @change="edit('assets','createSpecular',$event)">Create specular map (_s)</label>
+                            <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.assets.createNormal" @change="edit('assets','createNormal',$event)">Create normal map (_n)</label>
+                            <p>Controls automatic map copies from source assets. Existing skin maps are kept and imported.</p>
+                        </section>
+                    </section>
+                    <section v-show="tab==='appearance'" id="mcpskins-settings-panel-appearance" role="tabpanel" aria-labelledby="mcpskins-settings-tab-appearance">
+                        <h3>Appearance</h3>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.appearance.compact" @change="edit('appearance','compact',$event)">Compact mode</label><p>Smaller rows in the skin list.</p>
+                        <label>Texture preview size<select :value="s.settings.appearance.previewSize" @change="edit('appearance','previewSize',$event)"><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
+                        <label>Panel theme<select :value="s.theme" @change="edit('appearance','theme',$event)"><option v-for="theme in themes" :key="theme" :value="theme">{{theme}}</option></select></label>
+                    </section>
+                    <section v-show="tab==='debug'" id="mcpskins-settings-panel-debug" role="tabpanel" aria-labelledby="mcpskins-settings-tab-debug">
+                        <h3>Health Check</h3>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.live" @change="edit('health','live',$event)">Check saved files automatically</label><p>When disabled, click the health icon to run a check manually.</p>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingHud" @change="edit('health','missingHud',$event)">Warn about missing HUD textures</label>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingIcon" @change="edit('health','missingIcon',$event)">Warn about missing icon textures</label>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingMaps" @change="edit('health','missingMaps',$event)">Warn about missing normal/specular maps when defaults exist</label>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.collections" @change="edit('health','collections',$event)">Check Collection Cases definitions</label>
+                        <p>Registry and texture file errors are still checked. HUD and icon aspect ratios are not checked.</p>
+                        <div class="mcpskins-settings-reset"><button type="button" @click="reset">Factory Reset</button></div>
+                    </section>
+                </div>
+            </div>
+            <footer class="mcpskins-settings-footer"><p>Settings save automatically in Blockbench and apply across packs.</p><p>Guides, community help, and files to get started.</p><div class="mcpskins-settings-bottom-row"><help-links></help-links><button type="button" class="mcpskins-settings-close" @click="close">Close</button></div></footer>
+        </section>`
+    };
+}
+module.exports = {settingsComponent};
+
+},
+"src/ui/help.js": function(module, exports, require) {
+'use strict';
+const icons = require("src/assets/help/icons.js");
+
+const HELP_LINKS = [
+    {label: 'MCPSkins Wiki', icon: icons['mcpskins-wiki'], url: 'https://github.com/json-nn/mcpskins/wiki'},
+    {label: 'MCPManager Wiki', icon: icons['plugin-wiki'], url: 'https://github.com/DrMjonter/MCPSkins-Manager/wiki/01.-Creating-a-Skin-(Basics)'},
+    {label: 'MCPSkins Discord', icon: icons.discord, url: 'https://discord.gg/YY8uhTdcme'},
+    {label: 'Templates', icon: icons.templates, url: 'https://drive.google.com/drive/u/0/folders/1z8s_DC2uj4ZyfqBWJqcFzpXoPtsx-FhV'}
+];
+
+function helpComponent(open, links = HELP_LINKS, showDescription = true) {
+    return {
+        data() { return {links, showDescription}; },
+        methods: {open(link) { if (/^https:\/\//i.test(link.url)) open(link.url); }},
+        template: `<section class="mcpskins-help">
+            <p v-if="showDescription">Guides, community help, and files to get started.</p>
+            <div class="mcpskins-help-links"><button v-for="link in links" :key="link.label" type="button" :disabled="!link.url" @click="open(link)" :title="link.label" :aria-label="link.label"><img :src="link.icon" alt="" aria-hidden="true" draggable="false"></button></div>
+        </section>`
+    };
+}
+
+module.exports = {HELP_LINKS, helpComponent};
+
+},
+"src/assets/help/icons.js": function(module, exports, require) {
+// Generated by tools/build.py from the help PNGs.
+'use strict';
+module.exports = {
+  "mcpskins-wiki": "data:image/png;base64,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LnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgMTAuMC1jMDAwIDc5LmNhMTY4M2EsIDIwMjYvMDkvMDItMTg6NDE6MzUgICAgICAgICI+IDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+IDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PSIiIHhtbG5zOnhtcD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLyIgeG1sbnM6ZGM9Imh0dHA6Ly9wdXJsLm9yZy9kYy9lbGVtZW50cy8xLjEvIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bXA6Q3JlYXRvclRvb2w9IkFkb2JlIFBob3Rvc2hvcCAyOC4wICgyMDI2MTAyNi5tLjM3MjcgNjZhMGUwNikgIChXaW5kb3dzKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjYtMTEtMjFUMTE6MDA6NDEtMDU6MDAiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTExLTIxVDExOjA0OjE3LTA1OjAwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI2LTExLTIxVDExOjA0OjE3LTA1OjAwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjU0ZjNjMTM4LTVmNDctYTQ0NS1hNWQzLWUxYzMwMmI0MjEzYiIgeG1wTU06RG9jdW1lbnRJRD0iYWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjdhYjg5MjU1LTRkNmMtNGQ0ZC1iZDI4LWU0Mzk4NmFiNjdiYSIgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOjgwMTk4OWY2LTI4NzAtNzQ0Mi1iNGI5LTQ3M2RhNTFkNTBmNCI+IDx4bXBNTTpIaXN0b3J5PiA8cmRmOlNlcT4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNyZWF0ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6ODAxOTg5ZjYtMjg3MC03NDQyLWI0YjktNDczZGE1MWQ1MGY0IiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjAwOjQxLTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNvbnZlcnRlZCIgc3RFdnQ6cGFyYW1ldGVycz0iZnJvbSBhcHBsaWNhdGlvbi92bmQuYWRvYmUucGhvdG9zaG9wIHRvIGltYWdlL3BuZyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6NTRmM2MxMzgtNWY0Ny1hNDQ1LWE1ZDMtZTFjMzAyYjQyMTNiIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjA0OjE3LTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+K0RT4wAABiVJREFUeNrtm3lsFUUcx1tUEmNNQFFb7xoiKBTqkZh4BjUgwh8KgtXEGxVKPLjiGa+IRwTxCFApXphISwX9Q0SISBQ1MfFoKSg1xAqKBQUlscYEtfXzk+/T9fF23759s69P3U2+mXZ2ZvY33535zW++s6+0u7u75P98lcZNQHt7+2Ekw8BgcAI4HhwCysABKvYz6ATfgy/A52A9WFNZWbn9X0cAnR5CcgUYCQbl2dwGsAK8BBnripYAOt2b5FowEQz13LIHtIAPQBvYCL4BPwl2HSgcCQaCAeB0tVPqacvaqQPPQcbuoiBAHa8FM8DhyjbjloPFYDXG/hCx7YNIzgOXgVGgt259Cx4D8/IlIi8CMNCMm6s3Ztc2GfZC1E5nIeNqEV2ubBtRk3nW6oISgDFl6viVyjLndY/LoRliqj0gZ2rXIhHRGTsBGFBF0qS33q05eRcP/7GQyxd29CWZKZ9TqtEwDjtaYyOAh15E8jLYH3TY3OSB7/TkOo5N58jXVIBfwOXY9JpzAnjQdSQLQC/wtjr/XTEEM9h2qEg4F3SBG7DtWWcEqPML9W+jzf2453pE32C+4FJlTQhDQlYCNOyX6s3bfK+l4aKMn7HVfME8+QUbCWOzTYdAAuTwPtScb9SwL+rNg0hYrJFgPuG0IMfoS4CWuo/k7W3Ojyy2YZ9lOqyQT7DV4VS/JTKIgBe1zpu3ry4Wh5ejY2zW6rAI+68KTYAivLe0zg/r6aUuoJPml3ph328BS+QaxQnnZ4oY9yJAw2edhv58KtUW6RC30TkGjMbGroCy5hQnaSoMSZ/GmQi4lWSOwtsBhY7wQoTg14Np4Aj7G/sWhogY2xQ2T6H8E74EiNl27eomUbiuSDpuG6GbhIOVvRUcF8YxU9+WxfnaRVZ666QTkCpou7pjetrrY0+F3vZEj3qUuqZi35wcpsxm7SL/8WLTCWiWCDGNQo/3YMf7a9t7DdhP2c2Sy8aDneDYXHZ/tDmVZLaJKtSr3osAyVgtEjMqXO/nQxpp5N8BLgH7KHsteAisAh/bkgzuw777I0yjDokqQ1PympcAEzKmg1e5OabAHT+D5E5woSf7Des4tryvMhcouDEB9egoL4g2lpFcDGZRf0Y6AeslYI7nZlOBQtYR6vhZyv4dvAIexoaWtPLvqtxs7k2P+MxxJEvABtoY/BcBkq63KfDpF+fwV/Bihtyu4WzXr+B5k9N49iafEfKeyplz7shjNdmhwKjcJPcUATXaQDSTeVLMwcttoH/J3+cBdXqrHQF1l2t6LKDcjXna8amIt41dQ4qAB03Wkso6OabOt+pQpERe/GlDttEmx9is6TEw0wjJ0Za5UrFn0tbdKQKWKqy8hcynYiBgAkk92CUxsz7sEkbdBm1tG6lT48CWm0meBMtob2yKgFYdXY0gc1UMc75Nwz508OKJBzZqSaxOd4wR7RlOshKsp72qFAHmAM0RDiLzM8cE2NtriBi8PGP6ni2J1BvlyJ4Tddy2nTbLUwR0KtS09fVrx0vdJ5mCFxEzV/+apt+YIQzerEjwzFQ84MCmo0i2mAOmzbIUAal4uC+ZuxwS4Bu8cG+HZ2Ozk3v90urO0j5gLffOdmhTH5I/d7i0Wxo3Ab7BSxABWq+3aFSaFPdm3AQ4nwLZgpegKcC9e23KaPk72aUQ6zcFnDvBqMGLRI+vNDpq0n1DXE7Q6TKYT/BC3SkkthXfJEWqyzEBGZdBp4FQlODFI3fZKXOfMHKXy0DIWSica/DiI3eZ8FEVhyLlFwo72wyFDV585C4b9o+W7NHxd8e0Kcu4GXKyHQ4TvATIXY+AJtdzPtR22JUgEhS8ZJG7VhbizNFXEHEhifkFL2HkrgJKb4GSWF6iaFrwcgoYHlbuKuDZgr8omo8snha8LJHwEUruKiABwbJ4PgcjnuDFe4WSuwp4lhjqYCTnozHV+bJkz1ldTnJXAQkIdzQW5XDUI3dt1RCrj/K9Xsyf04U7HM31eFxy1+sWVsYZvORJQG7H47l8IEG5fUm64gxeHHxDmNsHEsknMslHUslncsmHksmnssnH0snn8skPJpKfzCQ/mkp+Npf8cDL56Wzy4+n//vUHlq/DvX7OdMQAAAAASUVORK5CYII=",
+  "plugin-wiki": "data:image/png;base64,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LnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgMTAuMC1jMDAwIDc5LmNhMTY4M2EsIDIwMjYvMDkvMDItMTg6NDE6MzUgICAgICAgICI+IDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+IDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PSIiIHhtbG5zOnhtcD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLyIgeG1sbnM6ZGM9Imh0dHA6Ly9wdXJsLm9yZy9kYy9lbGVtZW50cy8xLjEvIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bXA6Q3JlYXRvclRvb2w9IkFkb2JlIFBob3Rvc2hvcCAyOC4wICgyMDI2MTAyNi5tLjM3MjcgNjZhMGUwNikgIChXaW5kb3dzKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjYtMTEtMjFUMTE6MDA6NDEtMDU6MDAiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTExLTIxVDExOjA0OjM0LTA1OjAwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI2LTExLTIxVDExOjA0OjM0LTA1OjAwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjZhOGI1ZDcyLWI2ZDgtYWM0ZC04MWVhLTA0YTE1OGU1NTc5ZiIgeG1wTU06RG9jdW1lbnRJRD0iYWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjg4ODI0NzJlLWMxY2MtNjQ0My1hNWVhLTUyODYwYTBlYmRlMiIgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOjYwYjM0NGRlLTk4ZmMtNmY0YS1iNDhhLTY4MzhiOTVlYTViYyI+IDx4bXBNTTpIaXN0b3J5PiA8cmRmOlNlcT4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNyZWF0ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6NjBiMzQ0ZGUtOThmYy02ZjRhLWI0OGEtNjgzOGI5NWVhNWJjIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjAwOjQxLTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNvbnZlcnRlZCIgc3RFdnQ6cGFyYW1ldGVycz0iZnJvbSBhcHBsaWNhdGlvbi92bmQuYWRvYmUucGhvdG9zaG9wIHRvIGltYWdlL3BuZyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6NmE4YjVkNzItYjZkOC1hYzRkLTgxZWEtMDRhMTU4ZTU1NzlmIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjA0OjM0LTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+XDOOZQAABIlJREFUeNrtW2tIFUEUXo2k0j8RvSghySJLKfvhj4IeRNFDCHpYQhaZlUlJDy16UBQ9SHuRUVaa9ABNK4ieFNED6oc/svBaUYZBgZZEf9TCUPsOzcbedXfvujtz75oz8HFgmTtzzrd3zpxzZjaso6ND6cktTDQBdXV1AyFmAPFAHDAaoGdRQCTr1gw0AY3Ae+At4AMexcTENHY7AmA0GbscmAuMczlcDXAXuAQyfJ4lAEZHQKwAsoAJgl7YK+A0cBFktHqCABjeGyITyAWig7R0PwP5QCGI+B0yAmD8NPZG4kLkw8hXZIGEJ0ElAIaT8zoJpHvEmV8AskFEs3ACYDw5tXJgrMd2tDdACkioEUYAjE+GuAr08+i23gIsAQm3uRMA45eR9wXCPR7btNNuBBKucCOAGX+5mwV5aXZICEgA+9vf7AZv3uifMD/QcrAkgDm8Sg+veTs+IcnKMZoSwLa6Sg96eye7Q5LZFmlFQLGH9nnXcQIIWGWbABbhPf7PMt/pRhFjJwJYbP86hOGtyLB5vD53MCJgAwtzvdjagAogDxgG3Ori7ylcLjAlgKW0tUHM6uw2Sn1LgCMwoJbpmgjx0kEWGatNpfUErIY45yHDyXOfAY5B6XrdP7UUYqmDMddgrPNmBFQJLGZ0pX1ny7AAyv4wcNKxEO+AXk6KKhgzsRMBrIxVHWLDvwBHgSIo2WQRoBVCrHUxT4JaXtMSkMeqOqFoH4DDlG8EKnVBz6EQn4AIF/PlY56tegJ8HAqYTmp8h4BrUKjdZlZKpbAcl/PWYL74fwSw0vW3IBr+jAyHEve7WIzpzzx5JAcdBlHJXSWAvGlpEAy/AxzExC8UZzXI3RB7OemSCj3KVAL248FOwcbPwoQPFecF2Ci29gdw0ucA9NmlEnAdDxaIfPOYLFlxV37fCHGco043oNNClYBqdnQlqk12+rfXRKgfgeEcdfJBpwSVgAY8GCzK4WGiqTqDqMByitYhe0T+Zz36tZgQQKlsEWe9vmK+ISoBTZw8q1Gbo/f2mI/q+Ct1/UrQL93A+HAW9Y3iHWZjviiVAFFHxH5hp8aonxB9dI9/oW9fg74pyt9SPPeG+cJEE0A1+nKXBAjLT7QEiFgCFN6OMYrw7C4B9JsNcU9UpqldAiKcYAYmKDZxaracIPo9hZgiiAA/J8h7G6SsbqSbM3zoNAniucCt2W8b5B0IbcLgJ1wGPnSgMU8gAX6BEM9QmIoZI6zyeRvGz4R4IDg09wuFeSZDezDwPhd/+x2C37xhMsQrHaYaXrRRGSuA4eTttwt0eNbpMMeCCFVtc20aTRHeImZ4sOuQ/gURTiWxVrb2620kNmnANgHhrauSmNui6FkMmhkgn88AtnDO6hQuRVGXYWcbi/pqTcpYdNqUzbGYwS0/4XUwUoZBUw2qt5uBdQIzTYX3wYjTo7GJGLRKc2iRw2L9CMVbzfpozMXhKO3bDcyJLlacndgEo1kfjsrjcXlBQl6RkZek5DU5eVFSXpWVl6XldXn5wYT8ZEZ+NCU/m5MfTspPZ+XH0z2h/QHx1+Sfnex94wAAAABJRU5ErkJggg==",
+  "discord": "data:image/png;base64,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LnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgMTAuMC1jMDAwIDc5LmNhMTY4M2EsIDIwMjYvMDkvMDItMTg6NDE6MzUgICAgICAgICI+IDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+IDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PSIiIHhtbG5zOnhtcD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLyIgeG1sbnM6ZGM9Imh0dHA6Ly9wdXJsLm9yZy9kYy9lbGVtZW50cy8xLjEvIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bXA6Q3JlYXRvclRvb2w9IkFkb2JlIFBob3Rvc2hvcCAyOC4wICgyMDI2MTAyNi5tLjM3MjcgNjZhMGUwNikgIChXaW5kb3dzKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjYtMTEtMjFUMTE6MDA6NDEtMDU6MDAiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTExLTIxVDExOjA2OjE5LTA1OjAwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI2LTExLTIxVDExOjA2OjE5LTA1OjAwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOmZjMjhkY2ZkLWI1YzQtYTE0YS1hMjA0LTA0Njc4NTBkOGRmMCIgeG1wTU06RG9jdW1lbnRJRD0iYWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOmI1NzcwZWJiLWQyMzAtZTk0MC1iZmZiLTEwOTczZDdmZWQ5MCIgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOjQ3ZDM1NmMwLTQ3NzMtYTQ0OC05NDc2LTYzMWQyMjk5NWQ5MSI+IDx4bXBNTTpIaXN0b3J5PiA8cmRmOlNlcT4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNyZWF0ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6NDdkMzU2YzAtNDc3My1hNDQ4LTk0NzYtNjMxZDIyOTk1ZDkxIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjAwOjQxLTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNvbnZlcnRlZCIgc3RFdnQ6cGFyYW1ldGVycz0iZnJvbSBhcHBsaWNhdGlvbi92bmQuYWRvYmUucGhvdG9zaG9wIHRvIGltYWdlL3BuZyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6ZmMyOGRjZmQtYjVjNC1hMTRhLWEyMDQtMDQ2Nzg1MGQ4ZGYwIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjA2OjE5LTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+Y1PEcAAAA0RJREFUeNpj/P//P8NIBkwMIxyMBsBoAIwGwGgAjAbASAYsIOLBgweD2Y0SQPyCFgYrKChQNQXcAeL/aHgCFcx9jsXcRmo5mhHUEqQgBQgB8VtCdlDgvgtArE8r8ylJAZehMfGWCLVvoLQ2EOcD8REgvgnEz6BmfAbie0B8EYjXArEHkl59IsyHpYoUeqQANiD+OcjLNUZapQC7IeB5WIqgejWoB8QHh1Dt9p/aAXBxCFbx/6kVAEN5wOAVpQEgOMQbeqKUBsC7YdDa/UJuAPwdJs19biCeRk4ADKeOUiapnlwyDDt+KqQEQPQwDIDbxAaA7EgfELkwjP3bQEwACA3jAKgnFABsDAwje0xwzgjwsyO+AIilggWbgTiAATL4QS2QAcQhQLyPCmbtwxgUhQJPCg0WYcAcIZqE1BzlJtE8UPfbAU1sLZRWAOL7DJQNBv9BTwHVFBg4g8DwGA8ZZjrgkXsAxJcocG8ptixgTaZhhfiammQ2rYkZ1tKnYNS5jZrt/QkkDFB0EKHOkMTAH1IzQ5UMxA2Fj06N0TsAYkeg302RAyCCTpbeIkINvbrivsgBoEqBQcRWn8xE2kNKV/wIBe7WpVYAtADxOiLU/WGg7pD2OwqqbhBwomYhGAjEn3DIRZE5tA7So4hHjtIRaz70pjClgBdpwnQxNI8pU2jmPSi9AurWEGoXBLDJ0RG5WhI4Oco42g4YDYDRAACDpyPQ7x+QA2A/BQbFDaAnKOkNnkEOgKtkGuICrfIYaVFF4QEVUDsnkDnYwgAdVIEHAKifbkOGIXugdb80A2S4ihGKQQ2YH1T2tBWS+Z1Qsa0MBGZ/cYBgIE5FLwSPQg1fRIaBT6ABEYwUupxIDgbhMCDewEDcoGUKml4QPs6AGLmCrQzzItGdO6BmrSO0SqyPgvzFSMOkzw8rvMgAc2CxTswqsSKoR6JItGQ7jfP+RyDOIlFPDtQvqeS0A5ZDNU8k0jIvOhSA04lUNx/q9qnUaAgVIOXFfzjUaAySBhwT1J1JtGoJMkOHpJ+gid9koO8SuJ9oq8EsoB7/T/JyeTLAJaR1BPzQvElvwMEAmcl+R3F3eLQvMBoAowEwGgCjATAaAKMBMCIBACPgqMcSWFtxAAAAAElFTkSuQmCC",
+  "templates": "data:image/png;base64,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LnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgMTAuMC1jMDAwIDc5LmNhMTY4M2EsIDIwMjYvMDkvMDItMTg6NDE6MzUgICAgICAgICI+IDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+IDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PSIiIHhtbG5zOnhtcD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLyIgeG1sbnM6ZGM9Imh0dHA6Ly9wdXJsLm9yZy9kYy9lbGVtZW50cy8xLjEvIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bXA6Q3JlYXRvclRvb2w9IkFkb2JlIFBob3Rvc2hvcCAyOC4wICgyMDI2MTAyNi5tLjM3MjcgNjZhMGUwNikgIChXaW5kb3dzKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjYtMTEtMjFUMTE6MDA6NDEtMDU6MDAiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTExLTIxVDExOjA3OjE4LTA1OjAwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI2LTExLTIxVDExOjA3OjE4LTA1OjAwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjZjY2E3MzQ5LWFiYmItMWM0YS04M2NkLTUxYTlkNTI3Yzk2ZSIgeG1wTU06RG9jdW1lbnRJRD0iYWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjViMTA4ZTg2LTgyMjEtN2M0MC04Nzg4LTBmNjExNjczNGExMyIgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOjA1NTgzNGM5LWEwNDMtMzA0MS04ODA4LTlmODFlMjYzNjkyYiI+IDx4bXBNTTpIaXN0b3J5PiA8cmRmOlNlcT4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNyZWF0ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6MDU1ODM0YzktYTA0My0zMDQxLTg4MDgtOWY4MWUyNjM2OTJiIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjAwOjQxLTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNvbnZlcnRlZCIgc3RFdnQ6cGFyYW1ldGVycz0iZnJvbSBhcHBsaWNhdGlvbi92bmQuYWRvYmUucGhvdG9zaG9wIHRvIGltYWdlL3BuZyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6NmNjYTczNDktYWJiYi0xYzRhLTgzY2QtNTFhOWQ1MjdjOTZlIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjA3OjE4LTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+0AltowAAA6ZJREFUeNrtm0tsDVEYx3tR8VoQjwotbbxK9JGohaQadoJEFxaKiMdOdCFES9etEmJRsfOIqFpYVILYEZVY0IQS6pV6Rz2CxCtKx++Tb+Iqt52Ze+50mnsm+ee7ncw533d+M+eb75x7G3McJyOdj5gFYAFYABaABWABWAApPTo6OtowBT6b3UJFeXl5TmgACHQkphKtQbPQIHQXNaKDBPMpwOBjmO6A8Y3B54cAPkdhtug4Zqv/ezqOBvr8/A8AGk3HnNWB/+94gJbS+GGAgJywAOg4zqMZCS4REMvdcfwGoHe+tZfBx0MopvGXKALAzwjMjV4GHw9hnjwJLoBqTuz26KeahnsiCqAKU+/x8p30Xe8CkIQz12PDNhoWRRTATUyhx8tv03eBC+A7JzLT7A3YBYChFkCAKSDXlvl09j5gkLnoo4/rL/uoN/6aAmmfBNP7NZiKQkiCcUElCyC+r5QUQiZLYb0LW0VcP84QgLd8PiDyAiJQKZyghs/wsxihTbmAQpO1bczEYigO4AsZGOeafa5FEo7DyGpQn5xDaJ17Cu3C6SlDq8lVmDoZh546jjbH38l+Ww4TXDbmnFZgP/VtUktw3wwvqYdhaiR7o8FSkaJl+HnebwA04VxEAqETrSSgKyneWyjFnEZZSAa/OMgKNWkABJKDuarz/Q5aQiDPwijh1PcFNEfzwoKgvgMB0Dkvd7oYtUtlSABvwqxjiWG8Vn75+u4vDZITggI4ilmvj/38sO58gifhmk6HY8SxIeUAcLoC06zv1kU4benPFQ3xLMRc0pqlnHjOpAyAPvrtmvTqcFYThWUdcdXKa1eTYr6fqeAXgLtoeiwJCEdfIwJguCbiXHeRYxyAOpG5PhZVmCpyDEKQYqkJvUM5Xm+OHwAbMYfRIzQTB90RAyA54D6ahjYR3xHTAOSVIwlnO53vj+IWDzFuw+xDLcRYZgwAHU/AvNI/s+n8ZUQBTNJEKMdE4nxtCoAsK0/IpgmdlkR5o49Yr8tmB1pLrI2mADTo+novnVZFHIBs1+3Q/YtKUwDc+b+aTpsiDqACc9JrHvAK4AlmCiqh09aIA5DHX6bBU2KdagpAF2aIJpbOiAPI0oT9g1gzTQFwkvm6OmQAozP+fA8xqK8tvT4B9Ph+fyAA8BVvz13hyP6Sw+QvT4i1MBEAJ8xfchi8074Od7d6QANIJl4LwAKwACwAC8ACsAAsAAvAArCLIfsPExaABWABWAAWgAWQxscv56T2n29zIfEAAAAASUVORK5CYII=",
+  "settings": "data:image/png;base64,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LnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgMTAuMC1jMDAwIDc5LmNhMTY4M2EsIDIwMjYvMDkvMDItMTg6NDE6MzUgICAgICAgICI+IDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+IDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PSIiIHhtbG5zOnhtcD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLyIgeG1sbnM6ZGM9Imh0dHA6Ly9wdXJsLm9yZy9kYy9lbGVtZW50cy8xLjEvIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bXA6Q3JlYXRvclRvb2w9IkFkb2JlIFBob3Rvc2hvcCAyOC4wICgyMDI2MTAyNi5tLjM3MjcgNjZhMGUwNikgIChXaW5kb3dzKSIgeG1wOkNyZWF0ZURhdGU9IjIwMjYtMTEtMjFUMTE6MDA6NDEtMDU6MDAiIHhtcDpNb2RpZnlEYXRlPSIyMDI2LTExLTIxVDExOjExOjAyLTA1OjAwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDI2LTExLTIxVDExOjExOjAyLTA1OjAwIiBkYzpmb3JtYXQ9ImltYWdlL3BuZyIgcGhvdG9zaG9wOkNvbG9yTW9kZT0iMyIgcGhvdG9zaG9wOklDQ1Byb2ZpbGU9InNSR0IgSUVDNjE5NjYtMi4xIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjIzYmI1MzM0LTUyYTgtZWY0MC1iOTU5LTQ4NTYyYWM3ODYzMCIgeG1wTU06RG9jdW1lbnRJRD0iYWRvYmU6ZG9jaWQ6cGhvdG9zaG9wOjZjNDAwNzVlLWVmNDMtZjc0MS04YTY0LWMyMmY1M2YyYzU4NSIgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOmZmNDM1NzE5LWUzZDUtODI0Ny1hYjFlLWJmZjBiMDQ2MWZlNCI+IDx4bXBNTTpIaXN0b3J5PiA8cmRmOlNlcT4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNyZWF0ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6ZmY0MzU3MTktZTNkNS04MjQ3LWFiMWUtYmZmMGIwNDYxZmU0IiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjAwOjQxLTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiLz4gPHJkZjpsaSBzdEV2dDphY3Rpb249ImNvbnZlcnRlZCIgc3RFdnQ6cGFyYW1ldGVycz0iZnJvbSBhcHBsaWNhdGlvbi92bmQuYWRvYmUucGhvdG9zaG9wIHRvIGltYWdlL3BuZyIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6MjNiYjUzMzQtNTJhOC1lZjQwLWI5NTktNDg1NjJhYzc4NjMwIiBzdEV2dDp3aGVuPSIyMDI2LTExLTIxVDExOjExOjAyLTA1OjAwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjguMCAoMjAyNjEwMjYubS4zNzI3IDY2YTBlMDYpICAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+5RlgBwAAA1dJREFUeNrtW01IVUEUvs+VglAStQmrVy17SSGpbQqCgjYaSYsM0ufCrKDaFyq1r6B6tsgfyBZRVJugIKhNakhhz2X1KmmTRAaBrnp9B+bCy+67c+7P1J07c+DjwHNmzpzPuTPnzE+mXC47JkvmXxFQKpVqoGaBbZKic0BTNpv9lTYCGqE+M4tvAAHzaSNgD9RzZvG9IOBF2gjogRphFs+DgNG0EXAR6jyz+CUQcCGxBMCZOnRwKWCdCaijzOJ30H6X6j6FIgCGTkBdBx4AvTD6g1lvEqqVaWYK7bYx210FdQs4BJxCvWFlBMBYP9SNip/eAZ0wOsuo+xVqLdPUAtpcx2izCeoesLXi55OoW4idAA/nXVkWzI/41N0I9THg6NyENj/5tJkXI7HW489sElgE+DhfKWPC8JKoUw91DDgOtJCtgARQx6ZFuxNo96f7rYu+dEvqs0iQEsB03pWicLgdOAOsjmmyXgSuAo+AcSDHrCclwZcAMeEVHL2l329irEqAGGo07Go0J4ByivpqS6RsBNAMe1hzAu7D+c6wnwCtsTMrlhmdhJbpZr9YhTMJ0lo7VWW5SbLQ8twqi1G4y2BeRFs6Sa9fbBImEBplrL1JkTE43xN3JFgnApNcwp2nWKSFmxgFzQV2QL1OOAE74fwbVcnQINRAwgkYAgGDKpIhiu3nYwxvVQmFzY1u7hAnAX1QwzF0kPYF7gLPBKEktGG6DzgCtDmKw9+wBATZ0PASSof70LGnEjv7oW5SOhzBFntDhRsHUD5fCpHSuvIKOIhOfWOSvQbqMbArpD1yKuu3n/AHAeLQYj2w2QNbAuzkVPvPN3OdX0HCTMSRsAC8Bz544AsdvrgEFBknNmHlgGzYSz6HJ4r6NYd+5VwCVO2NT8LIbifadvrLmCbGvwR9y6gm4ByMXIlIwFmoy7oSsB1GihEJoND7ra4ENMDIYkQCKPD6bgmwn4CdBLUkQJtl0PhAyOxQ2PhkyKbD/IsRBZM3RMzeEjN+U9T4bXHjD0aMPhoz+nDU6ONx4y9IGH1Fxl6SMv2anL0oGc9V2S4RO0S5KksO3/5vV2XtZWl7Xd5zYrwGPEzYg4kO4LTSBxMVRmthaNnIJzOOfTRln83Zh5P26ax9PJ0e+Q34C9+fl+x8ZQAAAABJRU5ErkJggg=="
+};
+
+},
 "src/storage/settings.js": function(module, exports, require) {
 'use strict';
 const {validComponent} = require("src/domain/skin.js");
@@ -3245,15 +3845,19 @@ const {isObject, baseWeapon, validWeapon, basename, BASE_KEYS, itemKind} = requi
 const {loadPackMetadata, metadataFile} = require("src/storage/pack-metadata.js");
 const {variantIssues} = require("src/domain/variants.js");
 const {scanRarities} = require("src/storage/rarities.js");
+const {scanCollections, collectionIssues} = require("src/storage/collections.js");
 const {readJSON, isFile, isDirectory} = require("src/storage/files.js");
 
-function checkPack(fs, paths) {
+function checkPack(fs, paths, options = {}) {
     const issues = [];
     let files = 0, skins = 0;
     const add = (severity, message, filename, row = null) => issues.push({severity, message, filename,
         rowKey: row ? row.key : '', skinId: row ? String(row.skin.id ?? '') : '', registry: row ? row.filename : filename});
     const {rarities, warnings: rarityWarnings} = scanRarities(fs, paths);
     for (const warning of rarityWarnings) add('warning', warning.message, warning.filename);
+    if (options.collections !== false) try {
+        for (const issue of collectionIssues(scanCollections(fs, paths))) add(issue.severity, issue.message, issue.filename);
+    } catch (error) { add('error', 'Unable to check collections: ' + error.message, paths.pack); }
     let metadata = {};
     try { metadata = loadPackMetadata(fs, paths); } catch (error) { add('error', `Invalid pack metadata: ${error.message}`, metadataFile(paths)); }
     if (!isDirectory(fs, paths.registryDirectory)) {
@@ -3298,7 +3902,7 @@ function checkPack(fs, paths) {
             let canonical = null;
             try { canonical = paths.modelForSkin(weapon, skin.id, family, metadata.weapon_models || {}); } catch (error) { issue('error', error.message); }
             const models = (canonical && isFile(fs, canonical) ? [canonical] : [asset('.json'), asset('.geo.json')]).filter(file => isFile(fs, file));
-            if (!models.length) issue('warning', 'Skin geometry is missing; Open Model can create it if a source model is available.', asset('.geo.json'));
+            // Geometry is optional: texture-only skins intentionally use the stock model.
             for (const model of models) {
                 try {
                     const geo = readJSON(fs, model);
@@ -3310,8 +3914,9 @@ function checkPack(fs, paths) {
                 const file = asset(suffix + '.png');
                 if (!isFile(fs, file)) {
                     if (required) issue('error', 'Skin texture is missing.', file);
-                    else if (kind === 'HUD' || kind === 'Icon') issue('warning', `${kind} texture is missing (optional).`, file);
-                    else if (isFile(fs, paths.path.join(folder, basename(weapon) + suffix + '.png'))) issue('warning', `${kind} skin map is missing; a default map is available.`, file);
+                    else if (kind === 'HUD' || kind === 'Icon') {
+                        if ((kind === 'HUD' ? options.missingHud : options.missingIcon) !== false) issue('warning', `${kind} texture is missing (optional).`, file);
+                    } else if (options.missingMaps !== false && isFile(fs, paths.path.join(folder, basename(weapon) + suffix + '.png'))) issue('warning', `${kind} skin map is missing; a default map is available.`, file);
                     continue;
                 }
                 try {
@@ -3339,7 +3944,6 @@ function checkPack(fs, paths) {
                             }
                         } catch(error) { issue('warning','Animation metadata: '+error.message,file+'.mcmeta'); }
                     }
-                    if ((kind === 'HUD' && frameWidth !== frameHeight * 3) || (kind === 'Icon' && frameWidth !== frameHeight)) issue('warning', `${kind} aspect ratio should be ${kind === 'HUD' ? '3:1' : '1:1'}; found ${frameWidth} x ${frameHeight}.`, file);
                 } catch (error) { issue('error', `${kind} texture: ${error.message}`, file); }
             }
         });
@@ -3943,6 +4547,9 @@ module.exports = {BlockbenchBridge};
 'use strict';
 const {weaponSuggestions} = require("src/domain/weapon-options.js");
 const {PLUGIN_TITLE} = require("src/version.js");
+const {PREVIEW_SIZES} = require("src/domain/preferences.js");
+const icons = require("src/assets/help/icons.js");
+const {resizeList,clampListHeight,listHeightLimit,MIN_LIST_HEIGHT,MAX_LIST_HEIGHT} = require("src/ui/list-resize.js");
 const {rowStatus} = require("src/domain/status.js");
 const {THEMES} = require("src/domain/constants.js");
 const {sortedRarities} = require("src/domain/rarities.js");
@@ -3960,12 +4567,14 @@ function panelComponent(controller) {
     const manager = controller.manager;
     return {
         components: {'field-help': fieldHelp, 'weapon-picker': weaponPicker, 'variant-editor': variantEditor},
-        data() { return {pluginTitle: PLUGIN_TITLE, s: manager.state, titleEditing: false, titleDraft: '', titlePack: '', titleSaving: false, themes: ['Blockbench', ...Object.keys(THEMES)]}; },
+        data() { return {pluginTitle: PLUGIN_TITLE, settingsIcon: icons.settings, s: manager.state, listHeightDraft:null, listMaximum:MAX_LIST_HEIGHT, titleEditing: false, titleDraft: '', titlePack: '', titleSaving: false, themes: ['Blockbench', ...Object.keys(THEMES)]}; },
         computed: {
+            listHeight() { return Math.min(this.listMaximum,this.listHeightDraft ?? this.s.settings.appearance.listHeight); },
+            listStyle() { return this.listHeight ? {height:this.listHeight+'px',maxHeight:this.listMaximum+'px',minHeight:Math.min(100,this.listMaximum)+'px'} : {minHeight:Math.min(100,this.listMaximum)+'px'}; },
             healthTitle() {
                 const health = this.s.health;
-                return health.status === 'checking' ? 'Health Check: checking saved pack files...' :
-                    'Health Check: ' + health.errors + ' errors, ' + health.warnings + ' warnings' + (health.ignored ? ', ' + health.ignored + ' ignored' : '') + ' (saved files)';
+                return health.status === 'manual' ? 'Health Check: automatic checks disabled. Click to check saved files.' : health.status === 'checking' ? 'Health Check: checking saved pack files...' :
+                    'Health Check: ' + health.errors + ' errors, ' + health.warnings + ' warnings' + (health.ignored ? ', ' + health.ignored + ' ignored' : '') + (this.s.settings.health.live ? ' (saved files)' : ' (manual; click to recheck)');
             },
             rarities() { return sortedRarities(this.s.rarities); },
             bulk() { return this.s.selectedKeys.length > 1; },
@@ -4008,16 +4617,56 @@ function panelComponent(controller) {
             },
             palette() {
                 const theme = LIGHT_PALETTES[this.s.theme] || THEMES[this.s.theme];
-                if (!theme) return {};
-                return {'--mc-panel': theme.panel, '--mc-field': theme.field, '--mc-text': theme.text,
+                const size = PREVIEW_SIZES[this.s.settings.appearance.previewSize];
+                const sizing = {'--mc-list-limit':this.listMaximum+'px','--mc-preview-size':size+'px','--mc-hud-size':Math.round(size/3)+'px'};
+                if (!theme) return sizing;
+                return {...sizing, '--mc-panel': theme.panel, '--mc-field': theme.field, '--mc-text': theme.text,
                     '--mc-muted': theme.muted, '--mc-border': theme.border, '--mc-accent': theme.accent, '--mc-selected': theme.selected};
             }
         },
         watch: {
             's.folder'() { this.titleEditing = false; },
-            's.root'() { this.titleEditing = false; }
+            's.root'() { this.titleEditing = false; },
+            's.ready'() { this.$nextTick(this.watchListBounds); }
+        },
+        mounted() { this.watchListBounds(); },
+        beforeDestroy() {
+            if (this._listResize) this._listResize();
+            if (this._listBoundsObserver) this._listBoundsObserver.disconnect();
+            if (this._listBoundsWindow) this._listBoundsWindow.removeEventListener('resize',this.measureListBounds);
         },
         methods: {
+            measureListBounds() { if (this.$refs.skinList) this.listMaximum = listHeightLimit(this.$refs.skinList); },
+            watchListBounds() {
+                if (this._listBoundsObserver) this._listBoundsObserver.disconnect();
+                if (!this.$refs.skinList) return;
+                const view = this.$refs.skinList.ownerDocument.defaultView;
+                if (!this._listBoundsWindow) { this._listBoundsWindow=view; view.addEventListener('resize',this.measureListBounds); }
+                if (view.ResizeObserver) {
+                    this._listBoundsObserver = new view.ResizeObserver(this.measureListBounds);
+                    for (let node=this.$refs.skinList.parentElement; node; node=node.parentElement) this._listBoundsObserver.observe(node);
+                }
+                this.measureListBounds();
+            },
+            resizeList(event) {
+                if (this._listResize) this._listResize();
+                this.measureListBounds();
+                this._listResize = resizeList(event,this.$refs.skinList.getBoundingClientRect().height,
+                    height => { this.listHeightDraft=height; },height => controller.updateSettings('appearance','listHeight',height),() => this.listMaximum);
+            },
+            resetListSize() {
+                if (this._listResize) this._listResize();
+                controller.updateSettings('appearance','listHeight',0);
+            },
+            resizeListKey(event) {
+                if (!['ArrowUp','ArrowDown','Home','End','Enter'].includes(event.key)) return;
+                event.preventDefault(); event.stopPropagation();
+                if (event.key === 'Enter') return this.resetListSize();
+                const current=this.listHeight || this.$refs.skinList.getBoundingClientRect().height;
+                this.measureListBounds();
+                const height=event.key === 'Home' ? Math.min(MIN_LIST_HEIGHT,this.listMaximum) : event.key === 'End' ? this.listMaximum : clampListHeight(current+(event.key === 'ArrowUp' ? -1 : 1)*(event.shiftKey ? 80 : 20),this.listMaximum);
+                controller.updateSettings('appearance','listHeight',height);
+            },
             editPackTitle() {
                 this.titleDraft = this.s.packMetadata.title;
                 this.titlePack = manager.repository.paths.pack;
@@ -4056,7 +4705,7 @@ function panelComponent(controller) {
             changeTheme(event) { controller.changeTheme(event.target.value); }
         },
         template: `
-        <div class="mcpskins" :class="{'mcpskins-aero':s.theme === 'Frutiger Aero','mcpskins-light':s.theme === 'Neo' || s.theme === 'Soft','mcpskins-neo':s.theme === 'Neo','mcpskins-soft':s.theme === 'Soft'}" :style="palette">
+        <div class="mcpskins" :class="{'mcpskins-compact':s.settings.appearance.compact,'mcpskins-aero':s.theme === 'Frutiger Aero','mcpskins-light':s.theme === 'Neo' || s.theme === 'Soft','mcpskins-neo':s.theme === 'Neo','mcpskins-soft':s.theme === 'Soft'}" :style="palette">
             <header class="mcpskins-header">
                 <div class="mcpskins-brand"><strong>{{pluginTitle}}</strong><button v-if="s.update" type="button" class="mcpskins-update-button" @click="command('openUpdate')" :title="'Update available: v' + s.update.version + '. Open GitHub release.'" :aria-label="'Update available: v' + s.update.version + '. Open GitHub release.'"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 16V3m-5 5l5-5 5 5M4 16v5h16v-5"/></svg></button><span class="mcpskins-muted"> · Made by Mjonter</span></div>
                 <div class="mcpskins-pack-heading">
@@ -4066,6 +4715,7 @@ function panelComponent(controller) {
                         <button type="button" class="mcpskins-secondary mcpskins-health-button" @click="command('healthCheck')" :data-health="s.health.status" :title="healthTitle" :aria-label="healthTitle"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false"><path v-if="s.health.status === 'error'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/><template v-else-if="s.health.status === 'warning'"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 3L2 21h20z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 9v5m0 3v.2"/></template><path v-else-if="s.health.status === 'good'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M4 12l5 5L20 6"/><path v-else fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" d="M12 3a9 9 0 100 18 9 9 0 000-18"/></svg></button>
                     </template>
                     <button type="button" class="mcpskins-secondary" @click="command('configure')" title="Choose pack directory and namespace">Select Pack</button>
+                    <button type="button" class="mcpskins-secondary mcpskins-help-button" @click="command('showSettings')" title="Settings" aria-label="Settings"><img :src="settingsIcon" alt="" aria-hidden="true"></button>
                 </div>
             </header>
             <div v-if="!s.ready" class="mcpskins-empty">
@@ -4076,7 +4726,7 @@ function panelComponent(controller) {
                 <p class="mcpskins-path" :title="s.directory">{{s.folder}} / {{s.namespace}}<br>{{s.directory}}</p>
                 <p v-if="s.notice" class="mcpskins-notice" role="status">{{s.notice}}</p>
                 <details v-if="s.warnings.length" class="mcpskins-warnings"><summary>{{s.warnings.length}} file(s) skipped</summary><p v-for="warning in s.warnings.slice(0, 10)">{{warning}}</p></details>
-                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" @click="command('openRarities')">Rarities</button></div>
+                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" title="Edit TACZ gun pack directory" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" title="Edit and create rarities" @click="command('openRarities')">Rarities</button><button type="button" title="Edit collection metadata for CollectionCases mod" @click="command('openCollections')">Collection Cases</button></div>
                 <details v-if="s.gunPackWarnings.length" class="mcpskins-warnings"><summary>{{s.gunPackWarnings.length}} gun-pack warning(s)</summary><p v-for="warning in s.gunPackWarnings.slice(0, 20)">{{warning}}</p></details>
                 <div class="mcpskins-workspace">
                     <section class="mcpskins-browser" aria-label="Skin browser">
@@ -4086,7 +4736,7 @@ function panelComponent(controller) {
                             <select v-model="s.rarityFilter" aria-label="Filter by rarity"><option value="">All rarities</option><option v-for="rarity in rarities" :key="rarity.id" :value="rarity.id">{{rarity.name}}</option></select>
                             <select v-model="s.collectionFilter" aria-label="Filter by collection" title="Filter by collection"><option value="">All</option><option v-for="collection in collections" :key="collection" :value="collection">{{collection}}</option></select>
                         </div>
-                        <div class="mcpskins-table-wrap" tabindex="0" aria-label="Skin list. Use arrow keys to navigate.">
+                        <div ref="skinList" class="mcpskins-table-wrap" :style="listStyle" tabindex="0" aria-label="Skin list. Use arrow keys to navigate.">
                             <table class="mcpskins-table" aria-multiselectable="true" role="grid">
                                 <thead><tr><th v-for="column in [['gun','Weapon'],['name','Skin'],['rarity','Rarity'],['collection','Collection'],['file','File'],['is_new','New'],['progress','Progress']]" :key="column[0]" :aria-sort="s.sortColumn === column[0] ? (s.descending ? 'descending' : 'ascending') : 'none'"><button type="button" @click="sort(column[0])">{{heading(column[0], column[1])}}</button></th></tr></thead>
                                 <tbody><tr v-for="row in rows" :key="row.key" :data-skin-key="rowToken(row)" :class="{selected:s.selectedKeys.includes(row.key)}" :tabindex="tabRowKey === row.key ? 0 : -1" :aria-selected="s.selectedKeys.includes(row.key)" @click="select(row,$event)" @keydown.enter.prevent="select(row,$event)" @keydown.space.prevent="select(row,$event)" @contextmenu="context(row,$event)">
@@ -4095,7 +4745,8 @@ function panelComponent(controller) {
                             </table>
                             <p v-if="!rows.length" class="mcpskins-empty">{{s.missing ? 'No skins directory yet. Save a new skin to create it.' : s.rows.length ? 'No skins match these filters.' : 'No skins found. Create a new skin to begin.'}}</p>
                         </div>
-                        <footer class="mcpskins-browser-footer"><span class="mcpskins-muted">{{rows.length}} of {{s.rows.length}} skins · {{fileCount}} files<span v-if="s.selectedKeys.length"> / {{s.selectedKeys.length}} selected</span></span><div><button type="button" class="mcpskins-secondary" @click="command('newSkin')">New Skin</button></div></footer>
+                        <div class="mcpskins-list-resize" role="separator" aria-label="Resize skin list" aria-orientation="horizontal" :aria-valuemin="Math.min(120,listMaximum)" :aria-valuemax="listMaximum" :aria-valuenow="listHeight || undefined" tabindex="0" title="Drag to resize the list. Double-click to reset. Use Up/Down arrows to resize or Enter to reset." @pointerdown="resizeList" @dblclick="resetListSize" @keydown="resizeListKey"><span></span></div>
+                        <footer class="mcpskins-browser-footer"><span class="mcpskins-muted">{{rows.length}} of {{s.rows.length}} skins · {{fileCount}} files<span v-if="s.selectedKeys.length"> / {{s.selectedKeys.length}} selected</span></span><div><button type="button" class="mcpskins-secondary" title="Create a new skin entry" @click="command('newSkin')">New Skin</button></div></footer>
                     </section>
                     <section class="mcpskins-inspector" aria-label="Asset inspector">
                         <h3>Asset Inspector <span v-if="s.dirty" class="mcpskins-dirty">Unsaved</span></h3>
@@ -4141,6 +4792,7 @@ function panelComponent(controller) {
                                 </form>
                                 <details v-if="!bulk" class="mcpskins-previews" open><summary>Textures</summary>
                                     <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button></div>
+                                    <div v-if="['gun','attachment'].includes(s.draft.kind)" class="mcpskins-model-mode"><button type="button" :disabled="!s.selectedKey || s.dirty || s.duplicatePending" @click="command('toggleCustomModel')" :title="s.customModel ? 'Disable the geometry override and keep the model as an editing reference' : 'Enable this skin geometry as an in-game model override'">{{s.customModel ? 'Use Stock Model' : 'Use Custom Model'}}</button><small class="mcpskins-muted">{{s.customModel ? 'Custom geometry is enabled in game.' : 'Stock geometry in game. Open Model uses an editing reference.'}}</small></div>
                                     <figure v-for="card in s.previews" :key="card.kind"><figcaption>{{card.label}}</figcaption><div :class="['mcpskins-preview',card.kind]"><img v-if="card.source" :src="card.source" :alt="card.filename" @load="imageLoaded(card,$event)" @error="imageFailed(card)"><span v-else>{{card.message}}<small v-if="card.ratio" class="mcpskins-aspect">Recommended aspect ratio {{card.ratio}}</small></span></div><p class="mcpskins-muted">{{card.filename}}<br>{{card.dimensions}}</p></figure>
                                     <div class="mcpskins-asset-actions mcpskins-animation-action"><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
                                 </details>
@@ -4149,7 +4801,7 @@ function panelComponent(controller) {
                     </section>
                 </div>
             </template>
-            <footer class="mcpskins-theme"><label>Panel theme <select :value="s.theme" @change="changeTheme"><option v-for="theme in themes" :value="theme">{{theme}}</option></select></label><button type="button" @click="command('showShortcuts')" title="Show keyboard shortcuts">Keyboard Shortcuts</button></footer>
+            <footer class="mcpskins-theme"><button type="button" @click="command('showShortcuts')" title="Show keyboard shortcuts">Keyboard Shortcuts</button></footer>
         </div>`
     };
 }
@@ -4178,6 +4830,61 @@ function weaponSuggestions(discovered, kind = 'gun') {
     return [...options.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 module.exports = {DEFAULT_TACZ_WEAPONS, searchWeapons, weaponSuggestions};
+
+},
+"src/ui/list-resize.js": function(module, exports, require) {
+'use strict';
+const MIN_LIST_HEIGHT = 120, MAX_LIST_HEIGHT = 1200;
+const clampListHeight = (value, maximum = MAX_LIST_HEIGHT) => Math.max(Math.min(MIN_LIST_HEIGHT,maximum),Math.min(maximum,Math.round(value)));
+
+function listHeightLimit(list) {
+    const view = list.ownerDocument.defaultView;
+    let bottom = view.innerHeight - 12;
+    for (let node = list.parentElement; node; node = node.parentElement) {
+        const style = view.getComputedStyle(node), rect = node.getBoundingClientRect();
+        if (rect.height > 0 && /(auto|scroll|hidden|clip)/.test(style.overflowY)) {
+            const maximum = parseFloat(style.maxHeight);
+            bottom = Math.min(bottom,Number.isFinite(maximum) ? rect.top + maximum : rect.bottom);
+        }
+    }
+    const handle = list.nextElementSibling, footer = handle && handle.nextElementSibling;
+    const reserved = (handle ? handle.offsetHeight : 12) + (footer ? footer.offsetHeight : 32) + 24;
+    return Math.max(40,Math.min(MAX_LIST_HEIGHT,Math.floor(bottom - list.getBoundingClientRect().top - reserved)));
+}
+
+function resizeList(event, height, preview, commit, maximum = () => MAX_LIST_HEIGHT) {
+    if (event.button !== 0) return null;
+    event.preventDefault();
+    const document = event.currentTarget.ownerDocument, window = document.defaultView;
+    const startY = event.clientY, startHeight = height;
+    let current = clampListHeight(height,maximum()), done = false;
+    const matches = next => next.pointerId === event.pointerId;
+    const move = next => {
+        if (!matches(next)) return;
+        next.preventDefault();
+        current = clampListHeight(startHeight + next.clientY - startY,maximum());
+        preview(current);
+    };
+    const cleanup = () => {
+        if (done) return;
+        done = true;
+        document.removeEventListener('pointermove',move);
+        document.removeEventListener('pointerup',finish);
+        document.removeEventListener('pointercancel',cancelPointer);
+        if (window) window.removeEventListener('blur',cancel);
+        preview(null);
+    };
+    const finish = next => { if (!matches(next)) return; move(next); commit(current); cleanup(); };
+    const cancel = () => cleanup();
+    const cancelPointer = next => { if (matches(next)) cleanup(); };
+    document.addEventListener('pointermove',move);
+    document.addEventListener('pointerup',finish);
+    document.addEventListener('pointercancel',cancelPointer);
+    if (window) window.addEventListener('blur',cancel);
+    preview(current);
+    return cleanup;
+}
+module.exports = {resizeList,clampListHeight,listHeightLimit,MIN_LIST_HEIGHT,MAX_LIST_HEIGHT};
 
 },
 "src/ui/variant-editor.js": function(module, exports, require) {
@@ -4506,7 +5213,7 @@ module.exports = `
 .mcpskins-rarity-toolbar {display:flex;gap:6px;align-items:center;margin-bottom:8px}
 .mcpskins-rarity-toolbar input {flex:1;min-width:60px}
 .mcpskins-rarity-manager button {min-width:0;white-space:nowrap}
-.mcpskins-rarity-manager input:not([type=checkbox]),.mcpskins-rarity-manager select {box-sizing:border-box;min-height:28px;max-width:100%;font:inherit;color:var(--color-text);background:var(--color-dark);border:1px solid var(--color-border);border-radius:3px;padding:4px 7px}
+.mcpskins-rarity-manager input:not([type=checkbox]),.mcpskins-rarity-manager select,.mcpskins-rarity-manager textarea {box-sizing:border-box;min-height:28px;max-width:100%;font:inherit;color:var(--color-text);background:var(--color-dark);border:1px solid var(--color-border);border-radius:3px;padding:4px 7px}
 .mcpskins-rarity-scroll {overflow:auto;max-height:55vh;border:1px solid var(--color-border);border-radius:4px}
 .mcpskins-rarity-manager table {border-collapse:collapse;width:100%;text-align:left}
 .mcpskins-rarity-manager th,.mcpskins-rarity-manager td {padding:8px;border-bottom:1px solid var(--color-border);overflow-wrap:anywhere}
@@ -4530,6 +5237,11 @@ module.exports = `
 .mcpskins-rarity-target {display:grid;grid-template-columns:minmax(100px,1fr) 70px auto;gap:6px;align-items:end;margin-bottom:8px}
 .mcpskins-rarity-targets {border:1px solid var(--color-border);padding:8px;border-radius:4px}
 @container (max-width:650px) {.mcpskins-rarity-layout {grid-template-columns:1fr}.mcpskins-rarity-inspector {border-left:0;border-top:1px solid var(--color-border);padding:12px 0 0}}
+.mcpskins-collections textarea {width:100%;resize:vertical}
+.mcpskins-collection-advanced {border:1px solid var(--color-border);border-radius:4px;padding:8px}
+.mcpskins-collection-advanced summary,.mcpskins-collection-odds summary {cursor:pointer;font-weight:600}
+.mcpskins-collection-advanced label {margin:9px 0}
+.mcpskins-collection-odds {border-top:1px solid var(--color-border);padding-top:8px}
 .mcpskins-recent-packs {margin:18px 0 0}
 .mcpskins-recent-packs .mcpskins-new-pack {margin-bottom:14px}
 .mcpskins-recent-packs h3 {font-size:14px;margin:0 0 8px}
@@ -4587,6 +5299,37 @@ module.exports = `
 .mcpskins-pack-heading > .mcpskins-secondary {flex-shrink:0}
 .mcpskins .mcpskins-pack-heading > .mcpskins-health-button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;max-height:28px;padding:0}
 .mcpskins-health-button svg {display:block;flex-shrink:0}
+.mcpskins .mcpskins-pack-heading > .mcpskins-help-button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;padding:0;font-size:17px;font-weight:700}
+.mcpskins-help-button img {display:block;width:20px;height:20px;object-fit:contain}
+.mcpskins-help p {color:var(--color-subtle_text);margin-bottom:14px}
+.mcpskins-settings {font-size:13px;max-height:76vh;overflow:auto}
+.mcpskins-settings-layout {display:grid;grid-template-columns:140px minmax(0,1fr);gap:20px;min-height:320px}
+.mcpskins-settings-tabs {display:flex;flex-direction:column;gap:5px;border-right:1px solid var(--color-border);padding-right:12px}
+.mcpskins-settings-tabs button {text-align:left;min-width:0;width:100%;padding:9px 12px}
+.mcpskins-settings-tabs button.selected {background:var(--color-selected);box-shadow:inset 3px 0 var(--color-accent)}
+.mcpskins-settings-content {min-width:0;padding-right:4px}
+.mcpskins-settings h3 {font-size:15px;font-weight:700;margin:0 0 12px}
+.mcpskins-settings-defaults > summary {display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:700;cursor:pointer;padding:0 0 10px;list-style:none}
+.mcpskins-settings-defaults > summary::-webkit-details-marker {display:none}
+.mcpskins-settings-defaults > summary::after {content:'';width:8px;height:8px;flex-shrink:0;margin:0 4px 4px 12px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg);color:var(--color-subtle_text)}
+.mcpskins-settings-defaults[open] > summary::after {transform:rotate(225deg);margin-top:4px;margin-bottom:0}
+.mcpskins-settings-assets {border-top:1px solid var(--color-border);margin-top:14px;padding-top:16px}
+.mcpskins-settings-content label {display:flex;flex-direction:column;gap:6px;margin:12px 0}
+.mcpskins-settings-content input:not([type=checkbox]),.mcpskins-settings-content select {box-sizing:border-box;width:100%;min-height:30px;padding:5px 8px;background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px}
+.mcpskins-settings-content .mcpskins-settings-check {flex-direction:row;align-items:center;gap:8px}
+.mcpskins-settings-check input[type=checkbox] {position:static;flex:0 0 24px;min-width:24px;width:24px;height:24px;margin:0;padding:0;transform:none;background:transparent;border:0}
+.mcpskins-settings p,.mcpskins-settings small {color:var(--color-subtle_text);line-height:1.5}
+.mcpskins-settings-footer {border-top:1px solid var(--color-border);margin-top:18px;padding-top:8px}
+.mcpskins-settings-footer > p {font-size:11px}
+.mcpskins-settings-reset {border-top:1px solid var(--color-border);margin-top:20px;padding-top:14px}
+.mcpskins-settings-reset button {color:#e05a5a}
+.mcpskins-help-links {display:flex;justify-content:center;gap:14px;padding:8px 0 14px}
+.mcpskins-help .mcpskins-help-links button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 72px;width:72px;min-width:72px;max-width:72px;height:72px;min-height:72px;padding:8px;margin:0;border-radius:6px}
+.mcpskins-help-links img {display:block;width:100%;height:100%;object-fit:contain}
+.mcpskins-settings-bottom-row {display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-top:16px}
+.mcpskins-settings-bottom-row .mcpskins-settings-close {min-width:100px;height:32px;margin:0}
+.mcpskins-settings-footer .mcpskins-help-links {justify-content:flex-start;gap:10px;padding:0}
+.mcpskins-settings-footer .mcpskins-help .mcpskins-help-links button {flex:0 0 40px;width:40px;min-width:40px;max-width:40px;height:40px;min-height:40px;padding:6px;border-radius:4px}
 .mcpskins .mcpskins-health-button[data-health="error"] {color:#e05a5a}
 .mcpskins .mcpskins-health-button[data-health="warning"] {color:#d4a537}
 .mcpskins .mcpskins-health-button[data-health="good"] {color:#3bbd77}
@@ -4601,16 +5344,21 @@ module.exports = `
 .mcpskins-filters select {max-width:130px}
 .mcpskins .mcpskins-filters > .mcpskins-refresh-button {display:inline-flex;align-items:center;justify-content:center;align-self:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;max-height:28px;padding:0}
 .mcpskins-refresh-button svg {display:block;flex-shrink:0}
-.mcpskins-table-wrap {overflow:auto;border:1px solid var(--mc-border);border-radius:3px;max-height:300px;min-height:100px}
+.mcpskins-table-wrap {overflow:auto;border:1px solid var(--mc-border);border-radius:3px;max-height:min(300px,var(--mc-list-limit,1200px));min-height:100px}
 .mcpskins-table {border-collapse:collapse;width:100%;text-align:left;white-space:nowrap}
 .mcpskins-table th {position:sticky;top:0;background:var(--mc-panel);z-index:1;text-align:left}
 .mcpskins-table th button {border:0;background:transparent;font-weight:bold;width:100%;text-align:left}
+.mcpskins-compact .mcpskins-table td {padding-top:3px;padding-bottom:3px;font-size:12px}
 .mcpskins-table td {padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.07);max-width:260px;overflow:hidden;text-overflow:ellipsis}
 .mcpskins-table tbody tr {cursor:pointer;user-select:none}
 .mcpskins-table tr.selected {background:var(--mc-selected);box-shadow:inset 3px 0 var(--mc-accent)}
 .mcpskins-table tr:focus-visible {outline:1px solid var(--mc-accent);outline-offset:-2px}
 .mcpskins-rarity-dot {display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;box-shadow:0 0 0 1px #0004}
 .mcpskins-browser-footer {margin:8px 0}
+.mcpskins-list-resize {display:flex;align-items:center;justify-content:center;height:12px;cursor:ns-resize;touch-action:none;user-select:none;border-radius:3px}
+.mcpskins-list-resize span {width:36px;height:3px;border-radius:2px;background:var(--mc-muted);opacity:.4;pointer-events:none}
+.mcpskins-list-resize:hover,.mcpskins-list-resize:focus-visible {background:var(--mc-selected);outline:none}
+.mcpskins-list-resize:hover span,.mcpskins-list-resize:focus-visible span {background:var(--mc-accent);opacity:1}
 .mcpskins-inspector {border-top:1px solid var(--mc-border);padding-top:10px;margin-top:10px;min-width:0}
 .mcpskins-inspector h3 {font-size:14px;margin:0 0 8px;font-weight:600}
 .mcpskins-dirty {font-size:11px;color:var(--mc-accent);margin-left:6px}
@@ -4658,15 +5406,16 @@ module.exports = `
 .mcpskins-title {display:block;overflow-wrap:anywhere}
 .mcpskins-color,.mcpskins-save,.mcpskins-asset-actions {display:flex;gap:6px;flex-wrap:wrap}
 .mcpskins-animation-action {margin-top:12px}
+.mcpskins-model-mode {margin-top:10px;display:flex;flex-direction:column;align-items:flex-start;gap:5px}
 .mcpskins-color input {width:100px;flex:1;min-width:80px}
 .mcpskins-color .mcpskins-swatch {width:30px;min-width:30px}
 .mcpskins-previews {margin-top:12px;min-width:0}
 .mcpskins summary {cursor:pointer;font-weight:600;padding:6px 0}
 .mcpskins-previews figure {margin:10px 0;text-align:center}
 .mcpskins-previews figcaption {text-align:left;margin-bottom:4px}
-.mcpskins-preview {height:256px;width:100%;display:flex;align-items:center;justify-content:center;background-color:var(--mc-field);background-image:linear-gradient(45deg,#8881 25%,transparent 25%),linear-gradient(-45deg,#8881 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#8881 75%),linear-gradient(-45deg,transparent 75%,#8881 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0;border:1px solid var(--mc-border);color:var(--mc-muted);overflow:hidden;padding:6px}
+.mcpskins-preview {height:var(--mc-preview-size,256px);width:100%;display:flex;align-items:center;justify-content:center;background-color:var(--mc-field);background-image:linear-gradient(45deg,#8881 25%,transparent 25%),linear-gradient(-45deg,#8881 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#8881 75%),linear-gradient(-45deg,transparent 75%,#8881 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0;border:1px solid var(--mc-border);color:var(--mc-muted);overflow:hidden;padding:6px}
 .mcpskins-aspect {display:block;font-size:11px;opacity:.7;margin-top:5px}
-.mcpskins-preview.hud {height:85px}
+.mcpskins-preview.hud {height:var(--mc-hud-size,85px)}
 .mcpskins-preview img {max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;image-rendering:pixelated}
 .mcpskins-previews p {overflow-wrap:anywhere;margin:5px 0}
 .mcpskins-empty {padding:14px 4px;white-space:normal;color:var(--mc-muted)}
@@ -4729,8 +5478,8 @@ module.exports = `
 .mcpskins-light .mcpskins-color .mcpskins-swatch {background-image:none}
 .mcpskins-light ::-webkit-scrollbar-track {background:var(--mc-glass-zebra)}
 .mcpskins-light ::-webkit-scrollbar-thumb {background:var(--mc-glass-scroll);border:2px solid var(--mc-glass-zebra);border-radius:8px}
-@container (min-width:500px) {.mcpskins-editor {display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,256px);gap:16px}.mcpskins-previews {margin-top:0}}
-@container (min-width:1000px) {.mcpskins-workspace {display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1fr);gap:16px}.mcpskins-inspector {border-top:0;border-left:1px solid var(--mc-border);margin-top:0;padding-top:0;padding-left:16px}.mcpskins-table-wrap {max-height:600px}}
+@container (min-width:500px) {.mcpskins-editor {display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,var(--mc-preview-size,256px));gap:16px}.mcpskins-previews {margin-top:0}}
+@container (min-width:1000px) {.mcpskins-workspace {display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1fr);gap:16px}.mcpskins-inspector {border-top:0;border-left:1px solid var(--mc-border);margin-top:0;padding-top:0;padding-left:16px}.mcpskins-table-wrap {max-height:min(600px,var(--mc-list-limit,1200px))}}
 `;
 
 },

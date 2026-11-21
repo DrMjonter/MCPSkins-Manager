@@ -1,17 +1,23 @@
 # MCPSkins Manager
 
-## 1.3.0
+## 1.2.1
 
 ### Major Changes
 
-- Add animated texture tools with native Blockbench Flipbook editing and importing multiple PNG frames into a stitched texture.
-- Support per-frame timing in `.png.mcmeta`, including repeated frames and preserving timing through frame reordering and duplication.
-- Add New Pack to Select Pack to create the folder structure and save the pack title and author.
+- **Animated textures:** Added Blockbench's native Flipbook Editor support, separate PNG frame imports, and vertical strip imports. Included automatic texture and `.png.mcmeta` preparation, custom frame timing, and interpolation.
+- **Collection Cases editor:** Added collection metadata editing, case pricing, reward settings, Global Defaults, and an odds preview for the pack's saved skins.
+- **Collection renaming:** Added the ability to update a collection name and its matching skin entries across the pack together.
+- **New Pack:** Added new pack creation with automatic folder setup and protection for existing packs.
+- **Settings:** Added saved preferences for skin defaults, asset preparation, appearance, and health checks, plus a factory reset option.
 
 ### Quality of Life
 
-- Add Duplicate Current Frame as a toolbar action for quickly extending animated textures while painting.
-- Keep animation preparation, duplication, and health checks aware of animated texture files.
+- Added a resizable skin list that remembered its height and stayed within the available space.
+- Added **Duplicate Current Frame** as a toolbar action for quicker animation editing.
+- Made stock geometry the default for new skins and added controls for enabling custom models or returning to stock geometry.
+- Improved Health Check and removed HUD/icon aspect-ratio warnings.
+- Added quick access to wikis, Discord, and template files.
+- Expanded hover tooltips for clearer explanations.
 
 ## 1.2.0
 

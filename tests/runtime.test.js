@@ -1422,7 +1422,7 @@ function runtimeSourcePack(root, name, id = 'custom:rifle', texture = 'default s
     return folder;
 }
 
-test('controller discovers installed items, prepares canonical models, and remembers their paths for offline use', async t => {
+test('controller discovers items, prepares texture-only editing references, and remembers source paths for offline use', async t => {
     const {controller, root, local, nativeRequire, requests} = setup(t);
     const directory = path.join(root, 'gunpacks');
     runtimeSourcePack(directory, 'Custom');
@@ -1436,7 +1436,8 @@ test('controller discovers installed items, prepares canonical models, and remem
     let opened;
     controller.bridge.openModel = files => { opened = files; };
     await controller.openModel();
-    assert.equal(opened.model, path.join(root, 'Example/assets/custom/geo_models/gun/rifle_geo__skin_rifle_aurora.json'));
+    assert.equal(opened.model, path.join(root, 'Example/assets/mcpskins/textures/skins/custom/rifle/rifle_aurora.geo.json'));
+    assert.equal(fs.existsSync(path.join(root, 'Example/assets/custom/geo_models/gun/rifle_geo__skin_rifle_aurora.json')),false);
     assert.equal(fs.readFileSync(opened.texture, 'utf8'), 'default skin');
     assert.equal(fs.readFileSync(opened.normal, 'utf8'), 'default normal');
     const metadata = JSON.parse(fs.readFileSync(path.join(root, 'Example/mcpskins_manager.json'), 'utf8'));
@@ -1444,7 +1445,9 @@ test('controller discovers installed items, prepares canonical models, and remem
     const restarted = new Controller(nativeRequire, local);
     t.after(() => restarted.dispose());
     restarted.start();
-    assert.equal(restarted.manager.repository.paths.modelForSkin('custom:rifle', 'rifle_aurora'), opened.model);
+    assert.equal(fs.existsSync(restarted.manager.repository.paths.modelForSkin('custom:rifle', 'rifle_aurora')),false);
+    const {prepareSkin}=require('../src/assets/preparation');
+    assert.equal(prepareSkin(fs,restarted.manager.repository.paths,controller.manager.state.draft).model,opened.model);
     runtimeSourcePack(directory, 'Other', 'another:gun');
     assert.equal(controller.ensureGunPacks().items.length, 1);
     controller.rescanGunPacks();
@@ -1512,11 +1515,11 @@ test('unsaved legacy models are not migrated until their model and textures are 
     ModelProject.all.push({export_path: legacy, saved: false, textures: []});
     let opened;
     controller.bridge.openModel = files => { opened = files; };
-    await controller.openModel();
+    await controller.openModel(null,true);
     assert.equal(opened, undefined);
     assert.equal(fs.existsSync(path.join(root, 'Example/assets/custom/geo_models/gun/rifle_geo__skin_rifle_aurora.json')), false);
     ModelProject.all[0].saved = true;
-    await controller.openModel();
+    await controller.openModel(null,true);
     assert.ok(opened.model.endsWith('rifle_geo__skin_rifle_aurora.json'));
 });
 
@@ -2155,4 +2158,228 @@ test('switching between already-loaded animation frames updates the model textur
     assert.equal(applied.at(-1),two);
     bridge.bindTexture(project,{model:path.resolve('skin.geo.json'),texture:one.path,animationFrame:true});
     assert.equal(applied.at(-1),one);assert.deepEqual(reads,[]);
+});
+
+
+test('Collections menu renders in native Vue, edits metadata, renames skins and updates live health', async t => {
+    const Vue = installedVue();
+    if (!Vue) { t.skip('Installed Blockbench bundle not available'); return; }
+    const {controller, repository, globals} = healthySavedPack(t), dialogs = dialogEnvironment(t);
+    const errors = []; const oldWarn=Vue.config.warnHandler,oldError=Vue.config.errorHandler;
+    Vue.config.warnHandler=message=>errors.push(message);Vue.config.errorHandler=error=>errors.push(error.message);
+    t.after(()=>{Vue.config.warnHandler=oldWarn;Vue.config.errorHandler=oldError;});
+    const panelDefinition=panelComponent(controller),panel=new Vue({...panelDefinition,...Vue.compile(panelDefinition.template)});
+    const flatten=node=>[node,...(node.children||[]).flatMap(flatten)];
+    assert.ok(flatten(panel._render()).some(node=>node.tag==='button' && node.children?.some(child=>child.text==='Collection Cases')));
+    assert.equal(await controller.openCollections(),true);
+    const dialog=dialogs.at(-1),editor=controller.collectionEditor,component=dialog.options.component;
+    const view=new Vue({...component,...Vue.compile(component.template)});
+    await view.select('test');assert.ok(view._render());assert.equal(view.preview.odds.eligible,1);
+    view.edit('title',{target:{value:'Test Case'}});view.edit('description',{target:{value:'A collection description'}});
+    view.edit('price',{target:{value:'250'}});assert.equal(view.save(),true);assert.equal(view.c.dirty,false);
+    const file=path.join(repository.paths.pack,'data','example','collection_cases','test.json');
+    assert.equal(JSON.parse(fs.readFileSync(file,'utf8')).price,250);
+    view.edit('collection',{target:{value:'Renamed'}});assert.equal(view.save(),true);
+    assert.equal(controller.manager.state.rows[0].skin.collection,'Renamed');assert.ok(view._render());
+    view.weight(0,{target:{value:'0'}});assert.equal(view.save(),true);
+    assert.ok(controller.healthReport.issues.some(issue=>issue.message.includes('no eligible rewards')));
+    assert.equal(controller.manager.state.health.status,'warning');
+    await view.select('*');assert.equal(view.global,true);assert.ok(view._render());
+    view.edit('price',{target:{value:'300'}});dialog.options.onCancel();
+    assert.equal(dialog.visible,true);globals.prompt.callback(globals.prompt.options.buttons.indexOf('Save and Continue'));
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(dialog.visible,false);
+    assert.deepEqual(errors,[]);view.$destroy();panel.$destroy();
+});
+
+test('Collections opening respects dirty skin edits and rejects saving into a different pack',async t=>{
+    const {controller,globals,root}=healthySavedPack(t),dialogs=dialogEnvironment(t);
+    controller.manager.select(controller.manager.state.rows[0]);controller.edit('description','Unsaved');
+    const pending=controller.openCollections();globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
+    assert.equal(await pending,false);assert.equal(dialogs.length,0);
+    controller.revert();await controller.openCollections();const editor=controller.collectionEditor;
+    await editor.select('test');editor.edit('title','Keep here');
+    const {RegistryRepository}=require('../src/storage/registry'),{PackPaths}=require('../src/domain/paths');
+    controller.manager.attach(new RegistryRepository(fs,new PackPaths(path,root,'Other','other')));
+    assert.equal(editor.save(),false);assert.match(editor.state.error,/pack changed/);
+    dialogs.at(-1).options.onCancel();globals.prompt.callback(globals.prompt.options.buttons.indexOf('Discard'));
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(dialogs.at(-1).visible,false);
+});
+
+
+test('custom geometry is opt-in, can be disabled without losing either model, and respects open projects',async t=>{
+    const {controller,root,local,globals}=setup(t),directory=path.join(root,'sources');
+    runtimeSourcePack(directory,'Custom');
+    local.setItem('mcpskins_asset_manager.gunpacks.v1',JSON.stringify({directories:{[root]:directory}}));
+    const repository=controller.manager.repository;
+    repository.save({...controller.manager.state.draft,weapon:'custom:rifle',label:'Aurora',id:'rifle_aurora',collection:'Test',description:'Test'});
+    controller.manager.reload();controller.manager.select(controller.manager.state.rows[0]);
+    let opened;controller.bridge.openModel=files=>{opened=files;};
+    await controller.openModel();
+    const reference=opened.model,canonical=repository.paths.modelForSkin('custom:rifle','rifle_aurora');
+    assert.equal(controller.manager.state.customModel,false);assert.equal(fs.existsSync(canonical),false);
+    const referenceData=fs.readFileSync(reference,'utf8');
+    await controller.toggleCustomModel();assert.equal(opened.model,canonical);assert.equal(controller.manager.state.customModel,true);
+    const edited=JSON.stringify({'minecraft:geometry':[{bones:[{name:'custom_edit'}]}]});fs.writeFileSync(canonical,edited);
+    ModelProject.all.push({export_path:canonical,saved:true,textures:[]});
+    await controller.toggleCustomModel();assert.equal(fs.existsSync(canonical),true);assert.match(globals.prompt.options.message,/Save and close/);
+    ModelProject.all.length=0;await controller.toggleCustomModel();
+    assert.equal(fs.existsSync(canonical),false);assert.equal(controller.manager.state.customModel,false);assert.equal(fs.readFileSync(reference,'utf8'),edited);
+    assert.equal(fs.readFileSync(path.join(repository.paths.pack,'.mcpskins_manager/model_backups/rifle_aurora.geo.json'),'utf8'),referenceData);
+    await controller.openModel();assert.equal(opened.model,reference);assert.equal(fs.existsSync(canonical),false);
+    await controller.toggleCustomModel();assert.equal(controller.manager.state.customModel,true);assert.deepEqual(JSON.parse(fs.readFileSync(canonical,'utf8')),JSON.parse(edited));
+    await controller.openModel();assert.equal(opened.model,canonical);assert.deepEqual(JSON.parse(fs.readFileSync(canonical,'utf8')),JSON.parse(edited));
+});
+
+test('texture-only skins do not receive a missing-geometry health warning',t=>{
+    const {controller,asset}=healthySavedPack(t);fs.unlinkSync(asset('.json'));
+    const report=controller.updateHealth(true);assert.equal(report.issues.length,0);assert.equal(controller.manager.state.health.status,'good');
+});
+
+
+test('Settings opens without a pack, renders section tabs and keeps the help icons at the bottom',t=>{
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller,globals}=setup(t),dialogs=dialogEnvironment(t);
+    controller.manager.state.ready=false;
+    const definition=panelComponent(controller),panel=new Vue({...definition,...Vue.compile(definition.template)});
+    const flatten=node=>[node,...(node.children||[]).flatMap(flatten)],nodes=flatten(panel._render());
+    const heading=nodes.find(node=>node.data?.staticClass==='mcpskins-pack-heading');
+    const buttons=heading.children.filter(node=>node.tag==='button');
+    assert.equal(buttons.at(-1).data.attrs.title,'Settings');assert.equal(buttons.at(-2).children[0].text,'Select Pack');
+    assert.ok(buttons.at(-1).children[0].data.attrs.src.startsWith('data:image/png;base64,'));
+    buttons.at(-1).data.on.click();assert.equal(dialogs.at(-1).id,'mcpskins_settings');assert.equal(dialogs.at(-1).visible,true);
+    let opened;globals.Blockbench.openLink=url=>{opened=url;};
+    const component=dialogs.at(-1).options.component,view=new Vue({...component,...Vue.compile(component.template)});
+    assert.equal(view.tab,'general');assert.ok(view._render());
+    view.tab='appearance';view.edit('appearance','compact',{target:{type:'checkbox',checked:true}});
+    assert.equal(controller.manager.state.settings.appearance.compact,true);assert.ok(panel._render().data.class['mcpskins-compact']);
+    view.edit('appearance','previewSize',{target:{value:'large'}});assert.equal(panel.palette['--mc-preview-size'],'384px');
+    view.tab='debug';assert.ok(view._render());
+    const helpDefinition=component.components['help-links'],help=new Vue({...helpDefinition,...Vue.compile(helpDefinition.template)});
+    assert.deepEqual(Array.from(help.links,link=>link.label),['MCPSkins Wiki','MCPManager Wiki','MCPSkins Discord','Templates']);
+    help.open(help.links[0]);assert.equal(opened,help.links[0].url);
+    help.open({url:'file:///private'});assert.equal(opened,help.links[0].url);
+    assert.ok(help._render());help.$destroy();view.$destroy();panel.$destroy();
+});
+
+test('settings persist, migrate old themes, and new defaults do not change existing drafts or other pack metadata',async t=>{
+    const {controller,local,nativeRequire}=healthySavedPack(t);
+    controller.manager.select(controller.manager.state.rows[0]);controller.edit('description','Unsaved draft');
+    controller.updateSettings('defaults','collection','New Collection');controller.updateSettings('defaults','author','Artist');
+    controller.updateSettings('defaults','rarity','epic');controller.updateSettings('defaults','is_new',false);controller.updateSettings('defaults','unlocked',true);
+    controller.updateSettings('appearance','theme','Soft');controller.updateSettings('appearance','compact',true);
+    assert.equal(controller.manager.state.draft.description,'Unsaved draft');assert.equal(controller.manager.state.draft.collection,'Test');assert.equal(controller.manager.state.dirty,true);
+    controller.revert();await controller.newSkin();
+    assert.equal(controller.manager.state.draft.rarity,'epic');assert.equal(controller.manager.state.draft.color,controller.manager.state.rarities.epic.color);
+    assert.equal(controller.manager.state.draft.collection,'New Collection');assert.equal(controller.manager.state.draft.author,'Artist');
+    assert.equal(controller.manager.state.draft.is_new,false);assert.equal(controller.manager.state.draft.unlocked,true);
+    controller.updateSettings('defaults','rarity','not_in_pack');controller.manager.clear();assert.equal(controller.manager.state.draft.rarity,'common');
+    const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();
+    assert.equal(restarted.manager.state.settings.defaults.author,'Artist');assert.equal(restarted.manager.state.settings.appearance.compact,true);assert.equal(restarted.manager.state.theme,'Soft');
+    const {SETTINGS}=require('../src/domain/preferences');local.removeItem(SETTINGS);
+    const migrated=new Controller(nativeRequire,local);t.after(()=>migrated.dispose());migrated.start();assert.equal(migrated.manager.state.theme,'Soft');
+});
+
+test('health settings suppress selected warnings, preserve invalid-file errors, and keep manual checks available',async t=>{
+    const {controller,asset,repository,globals}=healthySavedPack(t);dialogEnvironment(t);
+    fs.unlinkSync(asset('_hud.png'));fs.unlinkSync(asset('_icon.png'));
+    fs.writeFileSync(path.join(path.dirname(asset('.png')),'ai_awp_n.png'),'default normal');
+    assert.equal(controller.updateHealth(true).issues.length,3);
+    for(const key of ['missingHud','missingIcon','missingMaps']) controller.updateSettings('health',key,false);
+    assert.equal(controller.healthReport.issues.length,0);
+    controller.updateSettings('health','live',false);const cached=controller.healthReport;
+    fs.writeFileSync(asset('.png'),'invalid PNG');assert.equal(controller.updateHealth(),cached);
+    assert.equal(controller.manager.state.health.status,'manual');
+    await controller.healthCheck();assert.equal(controller.manager.state.health.status,'error');assert.ok(controller.healthReport.issues.some(issue=>/Invalid PNG/.test(issue.message)));
+    const directory=path.join(repository.paths.pack,'data/example/collection_cases');fs.mkdirSync(directory,{recursive:true});fs.writeFileSync(path.join(directory,'broken.json'),'{bad');
+    assert.ok(controller.updateHealth(true).issues.some(issue=>issue.filename.endsWith('broken.json')));
+    controller.updateSettings('health','collections',false);assert.equal(controller.updateHealth(true).issues.some(issue=>issue.filename.endsWith('broken.json')),false);
+    controller.updateSettings('health','live',true);assert.equal(controller.manager.state.health.status,'error');
+});
+
+
+test('list resizing previews changes, saves once, clamps size, cancels safely and restores across sessions',t=>{
+    const {resizeList}=require('../src/ui/list-resize');
+    const listeners=new Map(),windowListeners=new Map();
+    const view={addEventListener:(type,handler)=>windowListeners.set(type,handler),removeEventListener:type=>windowListeners.delete(type)};
+    const document={defaultView:view,addEventListener:(type,handler)=>listeners.set(type,handler),removeEventListener:type=>listeners.delete(type)};
+    const event=(clientY,pointerId=7)=>({button:0,clientY,pointerId,currentTarget:{ownerDocument:document},preventDefault(){}});
+    const {controller,local,nativeRequire}=setup(t);let preview=null,saves=0;
+    resizeList(event(100),300,value=>{preview=value;},height=>{saves++;controller.updateSettings('appearance','listHeight',height);});
+    listeners.get('pointermove')(event(250));assert.equal(preview,450);assert.equal(saves,0);
+    listeners.get('pointermove')(event(500,8));assert.equal(preview,450);
+    listeners.get('pointerup')(event(250));assert.equal(preview,null);assert.equal(saves,1);assert.equal(listeners.size,0);assert.equal(windowListeners.size,0);
+    assert.equal(controller.manager.state.settings.appearance.listHeight,450);
+    const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();assert.equal(restarted.manager.state.settings.appearance.listHeight,450);
+    const cancel=resizeList(event(100),450,value=>{preview=value;},()=>saves++);
+    listeners.get('pointermove')(event(-10000));assert.equal(preview,120);
+    listeners.get('pointermove')(event(10000));assert.equal(preview,1200);
+    windowListeners.get('blur')();assert.equal(preview,null);assert.equal(saves,1);assert.equal(listeners.size,0);cancel();
+});
+
+test('native list resize handle supports keyboard sizing and resetting without changing skin edits',t=>{
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller}=healthySavedPack(t);const component=panelComponent(controller),panel=new Vue({...component,...Vue.compile(component.template)});
+    controller.manager.select(controller.manager.state.rows[0]);controller.edit('description','Keep edits');
+    panel.$refs.skinList={ownerDocument:{defaultView:{innerHeight:2000}},getBoundingClientRect:()=>({height:300,top:0})};
+    panel.resizeListKey({key:'ArrowDown',preventDefault(){},stopPropagation(){}});
+    assert.equal(panel.listStyle.height,'320px');assert.equal(panel.listStyle.maxHeight,'1200px');assert.ok(panel._render());
+    panel.resizeListKey({key:'ArrowUp',shiftKey:true,preventDefault(){},stopPropagation(){}});assert.equal(panel.listStyle.height,'240px');
+    panel.resetListSize();assert.equal(panel.listStyle.height,undefined);assert.equal(controller.manager.state.draft.description,'Keep edits');assert.equal(controller.manager.state.dirty,true);
+    panel.$destroy();
+});
+
+
+test('list maximum reserves room inside the plugin viewport and clamps dragging, saved heights and keyboard resizing',t=>{
+    const {listHeightLimit,resizeList}=require('../src/ui/list-resize');
+    const view={innerHeight:1000,getComputedStyle:node=>node.style};
+    const container={style:{overflowY:'auto',maxHeight:'none'},getBoundingClientRect:()=>({top:100,bottom:700,height:600}),parentElement:null};
+    const list={ownerDocument:{defaultView:view},parentElement:container,getBoundingClientRect:()=>({top:260,height:300}),nextElementSibling:{offsetHeight:12,nextElementSibling:{offsetHeight:40}}};
+    assert.equal(listHeightLimit(list),364);
+    container.style.maxHeight='600px';container.getBoundingClientRect=()=>({top:100,bottom:550,height:450});
+    assert.equal(listHeightLimit(list),364); // A content-sized root can still grow to its CSS maximum.
+    view.innerHeight=600;assert.equal(listHeightLimit(list),252);
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller}=healthySavedPack(t),definition=panelComponent(controller),panel=new Vue({...definition,...Vue.compile(definition.template)});
+    panel.$refs.skinList=list;controller.updateSettings('appearance','listHeight',1000);panel.measureListBounds();
+    assert.equal(panel.listStyle.height,'252px');assert.equal(controller.manager.state.settings.appearance.listHeight,1000);
+    panel.resizeListKey({key:'End',preventDefault(){},stopPropagation(){}});assert.equal(controller.manager.state.settings.appearance.listHeight,252);
+    view.innerHeight=800;panel.measureListBounds();assert.equal(panel.listMaximum,364);panel.$destroy();
+    const handlers=new Map(),dragDocument={defaultView:null,addEventListener:(name,fn)=>handlers.set(name,fn),removeEventListener:name=>handlers.delete(name)};
+    const event=y=>({button:0,pointerId:1,clientY:y,currentTarget:{ownerDocument:dragDocument},preventDefault(){}});let saved;
+    resizeList(event(0),200,()=>{},height=>{saved=height;},()=>364);
+    handlers.get('pointerup')(event(1000));assert.equal(saved,364);assert.equal(handlers.size,0);
+});
+
+
+test('Factory Reset confirms Yes/Cancel, restores settings and preserves pack files and unsaved skin edits',async t=>{
+    const {controller,globals,local,nativeRequire,repository}=healthySavedPack(t),dialogs=dialogEnvironment(t);
+    const {settingsFrom}=require('../src/domain/preferences');
+    controller.updateSettings('defaults','author','Artist');controller.updateSettings('appearance','compact',true);
+    controller.updateSettings('appearance','theme','Soft');controller.updateSettings('health','live',false);
+    controller.manager.select(controller.manager.state.rows[0]);controller.edit('description','Keep this draft');
+    const registry=controller.manager.state.rows[0].filename,before=fs.readFileSync(registry,'utf8');
+    controller.showSettings();const component=dialogs.at(-1).options.component;
+    let pending=component.methods.reset();
+    assert.equal(globals.prompt.options.message,'This will reset all settings. Are you sure?');assert.deepEqual(globals.prompt.options.buttons,['Yes','Cancel']);
+    globals.prompt.callback(1);assert.equal(await pending,false);assert.equal(controller.manager.state.settings.defaults.author,'Artist');
+    pending=component.methods.reset();globals.prompt.callback(0);assert.equal(await pending,true);
+    assert.deepEqual(controller.manager.state.settings,settingsFrom());assert.equal(controller.manager.state.theme,'Blockbench');
+    assert.equal(controller.manager.state.draft.description,'Keep this draft');assert.equal(controller.manager.state.dirty,true);
+    assert.equal(fs.readFileSync(registry,'utf8'),before);assert.equal(controller.manager.repository,repository);
+    const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();
+    assert.deepEqual(restarted.manager.state.settings,settingsFrom());assert.equal(restarted.manager.state.theme,'Blockbench');
+});
+
+
+test('Assets settings persist and control Open Model map preparation without hiding existing skin maps',async t=>{
+    const {controller,root,local,nativeRequire}=setup(t),directory=path.join(root,'sources');
+    runtimeSourcePack(directory,'Custom');local.setItem('mcpskins_asset_manager.gunpacks.v1',JSON.stringify({directories:{[root]:directory}}));
+    assert.equal(controller.manager.state.settings.assets.createNormal,true);assert.equal(controller.manager.state.settings.assets.createSpecular,true);
+    controller.updateSettings('assets','createNormal',false);controller.updateSettings('assets','createSpecular',false);
+    controller.manager.clear();Object.assign(controller.manager.state.draft,{weapon:'custom:rifle',label:'Aurora',id:'rifle_aurora'});
+    let opened;controller.bridge.openModel=files=>{opened=files;};await controller.openModel();assert.equal(opened.normal,null);assert.equal(opened.specular,null);
+    const normal=path.join(path.dirname(opened.texture),'rifle_aurora_n.png');fs.writeFileSync(normal,'existing normal');
+    await controller.openModel();assert.equal(opened.normal,normal);
+    const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();
+    assert.equal(restarted.manager.state.settings.assets.createNormal,false);assert.equal(restarted.manager.state.settings.assets.createSpecular,false);
 });

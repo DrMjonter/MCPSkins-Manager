@@ -483,7 +483,7 @@ test('pack health check scans geometry and image headers without modifying files
     assert.equal(fs.existsSync(path.join(f.paths.pack, 'mcpskins_manager.json')), false);
 });
 
-test('pack health reports duplicate IDs, broken registries, bad geometry and wrong image dimensions', t => {
+test('pack health reports invalid assets while accepting custom HUD and icon aspect ratios', t => {
     const {checkPack} = require('../src/assets/health');
     const f = fixture(t), result = f.repository.save(draft());
     const data = readJSON(fs, result.filename);
@@ -495,10 +495,11 @@ test('pack health reports duplicate IDs, broken registries, bad geometry and wro
     f.write(path.join(folder, result.id + '_hud.png'), pngHeader(32, 32));
     f.write(path.join(folder, result.id + '_icon.png'), pngHeader(64, 32));
     const report = checkPack(fs, f.paths);
-    for (const pattern of [/Duplicate skin ID/, /Unable to read/, /Invalid geometry/, /Skin texture is missing/, /HUD aspect ratio should be 3:1/, /Icon aspect ratio should be 1:1/]) {
+    for (const pattern of [/Duplicate skin ID/, /Unable to read/, /Invalid geometry/, /Skin texture is missing/]) {
         assert.ok(report.issues.some(issue => pattern.test(issue.message)), pattern);
     }
     assert.ok(report.issues.find(issue => /Duplicate/.test(issue.message)).rowKey);
+    assert.equal(report.issues.some(issue => /aspect ratio/.test(issue.message)), false);
 });
 
 test('health check treats optional images as warnings and reports corrupt PNGs and missing directories', t => {

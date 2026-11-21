@@ -32,9 +32,9 @@ def release():
     plugin = payload[PLUGIN].decode("utf-8")
     if "Plugin.register('mcpskins_asset_manager'" not in plugin:
         raise ValueError("The plugin ID does not match its loadable filename")
-    if re.search(r"\bdebugger\s*;|console\.(?:log|debug)\s*\(|localhost|127\.0\.0\.1|[A-Za-z]:\\", plugin):
+    if re.search(r"\bdebugger\s*;|console\.(?:log|debug)\s*\(|localhost|127\.0\.0\.1|(?<![A-Za-z])[A-Za-z]:\\", plugin):
         raise ValueError("The production bundle contains debugging code or a local path")
-    if re.search(r"(?im)^## Development\s*$|[A-Za-z]:\\", payload["README.md"].decode("utf-8")):
+    if re.search(r"(?im)^## Development\s*$|(?<![A-Za-z])[A-Za-z]:\\", payload["README.md"].decode("utf-8")):
         raise ValueError("The user README contains development-only or machine-specific content")
 
     sums = "".join(f"{digest(data)}  {name}\n" for name, data in payload.items())

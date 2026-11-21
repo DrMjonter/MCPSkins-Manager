@@ -110,11 +110,12 @@ test('ZIP validation rejects traversal, corrupt checksums, and changed archives'
     for (const ref of ['../bad:gun/model', 'custom:../model', 'custom:/model', '..:gun/model']) assert.throws(() => resourcePath(ref, 'geo_models', '.json'));
 });
 
-test('Open Model preparation creates canonical geometry and independent textures without changing source packs', t => {
+test('Open Model preparation creates an editing reference and independent textures without a geometry override', t => {
     const f = fixture(t); folderPack(f, 'source', resources());
     const c = new GunPackCatalog(fs, path, f.tacz, zlib.inflateRawSync).scan(), source = c.resolve('custom:rifle');
     const files = prepareSkin(fs, f.paths, draft(), source);
-    assert.equal(files.model, path.join(f.paths.pack, 'assets/custom/geo_models/gun/rifle_geo__skin_rifle_aurora.json'));
+    assert.equal(files.model, path.join(f.paths.textures('custom:rifle'), 'rifle_aurora.geo.json'));
+    assert.equal(fs.existsSync(modelOutput(f.paths, source.modelRef, draft().id)), false);
     assert.equal(fs.readFileSync(files.texture, 'utf8'), 'base PNG');
     assert.equal(fs.readFileSync(files.normal, 'utf8'), 'normal PNG');
     assert.equal(fs.readFileSync(files.specular, 'utf8'), 'specular PNG');
@@ -136,17 +137,17 @@ test('legacy skin geometry is migrated without overwriting it and failed copies 
     f.write(legacy, legacyData);
     const realWrite = fs.writeFileSync;
     const failing = {...fs, writeFileSync(filename, ...args) { if (filename.endsWith('_n.png')) throw new Error('simulated write failure'); return realWrite(filename, ...args); }};
-    assert.throws(() => prepareSkin(failing, f.paths, draft(), source), /simulated/);
+    assert.throws(() => prepareSkin(failing, f.paths, draft(), source, {customModel:true}), /simulated/);
     assert.deepEqual(JSON.parse(fs.readFileSync(legacy, 'utf8')), legacyData);
     assert.equal(fs.existsSync(modelOutput(f.paths, source.modelRef, draft().id)), false);
-    const result = prepareSkin(fs, f.paths, draft(), source);
+    const result = prepareSkin(fs, f.paths, draft(), source, {customModel:true});
     assert.deepEqual(JSON.parse(fs.readFileSync(result.model, 'utf8')), legacyData);
 });
 
 test('canonical geometry remains accessible offline and duplication copies the resolved model', t => {
     const f = fixture(t); folderPack(f, 'source', resources());
     const source = new GunPackCatalog(fs, path, f.tacz, zlib.inflateRawSync).scan().resolve('custom:rifle');
-    const initial = prepareSkin(fs, f.paths, draft(), source);
+    const initial = prepareSkin(fs, f.paths, draft(), source, {customModel:true});
     f.paths.modelReferences = {[modelKey('custom:rifle')]: source.modelRef};
     assert.equal(prepareSkin(fs, f.paths, draft()).model, initial.model);
     const copied = {...draft(), id: 'rifle_copy'};
@@ -348,4 +349,24 @@ test('controller Open Model imports LesRaisins geometry and copied maps without 
     fs.unlinkSync(filename); controller.catalog.dispose(); controller.catalog = null; controller.catalogAttempt = '';
     await controller.openModel();
     assert.ok(opened.model.endsWith('karambit_custom.geo.json'));
+});
+
+
+test('asset preferences independently control automatic maps for source packs and manual assets while preserving existing maps',t=>{
+    const f=fixture(t);folderPack(f,'source',resources());
+    const source=new GunPackCatalog(fs,path,f.tacz,zlib.inflateRawSync).scan().resolve('custom:rifle');
+    for(const mode of ['source','manual']) for(const normal of [false,true]) for(const specular of [false,true]) {
+        const d={...draft(),id:'rifle_'+mode+'_'+String(normal)+'_'+String(specular)};
+        const folder=f.paths.textures(d.weapon);
+        if(mode==='manual') {
+            f.write(path.join(folder,'rifle_geo.json'),geometry);f.write(path.join(folder,'rifle.png'),'base PNG');
+            f.write(path.join(folder,'rifle_n.png'),'normal PNG');f.write(path.join(folder,'rifle_s.png'),'specular PNG');
+        }
+        const files=prepareSkin(fs,f.paths,d,mode==='source'?source:null,{createNormal:normal,createSpecular:specular});
+        assert.equal(!!files.normal,normal);assert.equal(!!files.specular,specular);
+        assert.equal(fs.existsSync(path.join(folder,d.id+'_n.png')),normal);assert.equal(fs.existsSync(path.join(folder,d.id+'_s.png')),specular);
+        f.write(path.join(folder,d.id+'_n.png'),'painted normal');f.write(path.join(folder,d.id+'_s.png'),'painted specular');
+        const reopened=prepareSkin(fs,f.paths,d,mode==='source'?source:null,{createNormal:false,createSpecular:false});
+        assert.equal(fs.readFileSync(reopened.normal,'utf8'),'painted normal');assert.equal(fs.readFileSync(reopened.specular,'utf8'),'painted specular');
+    }
 });

@@ -1,6 +1,9 @@
 'use strict';
 const {weaponSuggestions} = require('../domain/weapon-options');
 const {PLUGIN_TITLE} = require('../version');
+const {PREVIEW_SIZES} = require('../domain/preferences');
+const icons = require('../assets/help/icons');
+const {resizeList,clampListHeight,listHeightLimit,MIN_LIST_HEIGHT,MAX_LIST_HEIGHT} = require('./list-resize');
 const {rowStatus} = require('../domain/status');
 const {THEMES} = require('../domain/constants');
 const {sortedRarities} = require('../domain/rarities');
@@ -18,12 +21,14 @@ function panelComponent(controller) {
     const manager = controller.manager;
     return {
         components: {'field-help': fieldHelp, 'weapon-picker': weaponPicker, 'variant-editor': variantEditor},
-        data() { return {pluginTitle: PLUGIN_TITLE, s: manager.state, titleEditing: false, titleDraft: '', titlePack: '', titleSaving: false, themes: ['Blockbench', ...Object.keys(THEMES)]}; },
+        data() { return {pluginTitle: PLUGIN_TITLE, settingsIcon: icons.settings, s: manager.state, listHeightDraft:null, listMaximum:MAX_LIST_HEIGHT, titleEditing: false, titleDraft: '', titlePack: '', titleSaving: false, themes: ['Blockbench', ...Object.keys(THEMES)]}; },
         computed: {
+            listHeight() { return Math.min(this.listMaximum,this.listHeightDraft ?? this.s.settings.appearance.listHeight); },
+            listStyle() { return this.listHeight ? {height:this.listHeight+'px',maxHeight:this.listMaximum+'px',minHeight:Math.min(100,this.listMaximum)+'px'} : {minHeight:Math.min(100,this.listMaximum)+'px'}; },
             healthTitle() {
                 const health = this.s.health;
-                return health.status === 'checking' ? 'Health Check: checking saved pack files...' :
-                    'Health Check: ' + health.errors + ' errors, ' + health.warnings + ' warnings' + (health.ignored ? ', ' + health.ignored + ' ignored' : '') + ' (saved files)';
+                return health.status === 'manual' ? 'Health Check: automatic checks disabled. Click to check saved files.' : health.status === 'checking' ? 'Health Check: checking saved pack files...' :
+                    'Health Check: ' + health.errors + ' errors, ' + health.warnings + ' warnings' + (health.ignored ? ', ' + health.ignored + ' ignored' : '') + (this.s.settings.health.live ? ' (saved files)' : ' (manual; click to recheck)');
             },
             rarities() { return sortedRarities(this.s.rarities); },
             bulk() { return this.s.selectedKeys.length > 1; },
@@ -66,16 +71,56 @@ function panelComponent(controller) {
             },
             palette() {
                 const theme = LIGHT_PALETTES[this.s.theme] || THEMES[this.s.theme];
-                if (!theme) return {};
-                return {'--mc-panel': theme.panel, '--mc-field': theme.field, '--mc-text': theme.text,
+                const size = PREVIEW_SIZES[this.s.settings.appearance.previewSize];
+                const sizing = {'--mc-list-limit':this.listMaximum+'px','--mc-preview-size':size+'px','--mc-hud-size':Math.round(size/3)+'px'};
+                if (!theme) return sizing;
+                return {...sizing, '--mc-panel': theme.panel, '--mc-field': theme.field, '--mc-text': theme.text,
                     '--mc-muted': theme.muted, '--mc-border': theme.border, '--mc-accent': theme.accent, '--mc-selected': theme.selected};
             }
         },
         watch: {
             's.folder'() { this.titleEditing = false; },
-            's.root'() { this.titleEditing = false; }
+            's.root'() { this.titleEditing = false; },
+            's.ready'() { this.$nextTick(this.watchListBounds); }
+        },
+        mounted() { this.watchListBounds(); },
+        beforeDestroy() {
+            if (this._listResize) this._listResize();
+            if (this._listBoundsObserver) this._listBoundsObserver.disconnect();
+            if (this._listBoundsWindow) this._listBoundsWindow.removeEventListener('resize',this.measureListBounds);
         },
         methods: {
+            measureListBounds() { if (this.$refs.skinList) this.listMaximum = listHeightLimit(this.$refs.skinList); },
+            watchListBounds() {
+                if (this._listBoundsObserver) this._listBoundsObserver.disconnect();
+                if (!this.$refs.skinList) return;
+                const view = this.$refs.skinList.ownerDocument.defaultView;
+                if (!this._listBoundsWindow) { this._listBoundsWindow=view; view.addEventListener('resize',this.measureListBounds); }
+                if (view.ResizeObserver) {
+                    this._listBoundsObserver = new view.ResizeObserver(this.measureListBounds);
+                    for (let node=this.$refs.skinList.parentElement; node; node=node.parentElement) this._listBoundsObserver.observe(node);
+                }
+                this.measureListBounds();
+            },
+            resizeList(event) {
+                if (this._listResize) this._listResize();
+                this.measureListBounds();
+                this._listResize = resizeList(event,this.$refs.skinList.getBoundingClientRect().height,
+                    height => { this.listHeightDraft=height; },height => controller.updateSettings('appearance','listHeight',height),() => this.listMaximum);
+            },
+            resetListSize() {
+                if (this._listResize) this._listResize();
+                controller.updateSettings('appearance','listHeight',0);
+            },
+            resizeListKey(event) {
+                if (!['ArrowUp','ArrowDown','Home','End','Enter'].includes(event.key)) return;
+                event.preventDefault(); event.stopPropagation();
+                if (event.key === 'Enter') return this.resetListSize();
+                const current=this.listHeight || this.$refs.skinList.getBoundingClientRect().height;
+                this.measureListBounds();
+                const height=event.key === 'Home' ? Math.min(MIN_LIST_HEIGHT,this.listMaximum) : event.key === 'End' ? this.listMaximum : clampListHeight(current+(event.key === 'ArrowUp' ? -1 : 1)*(event.shiftKey ? 80 : 20),this.listMaximum);
+                controller.updateSettings('appearance','listHeight',height);
+            },
             editPackTitle() {
                 this.titleDraft = this.s.packMetadata.title;
                 this.titlePack = manager.repository.paths.pack;
@@ -114,7 +159,7 @@ function panelComponent(controller) {
             changeTheme(event) { controller.changeTheme(event.target.value); }
         },
         template: `
-        <div class="mcpskins" :class="{'mcpskins-aero':s.theme === 'Frutiger Aero','mcpskins-light':s.theme === 'Neo' || s.theme === 'Soft','mcpskins-neo':s.theme === 'Neo','mcpskins-soft':s.theme === 'Soft'}" :style="palette">
+        <div class="mcpskins" :class="{'mcpskins-compact':s.settings.appearance.compact,'mcpskins-aero':s.theme === 'Frutiger Aero','mcpskins-light':s.theme === 'Neo' || s.theme === 'Soft','mcpskins-neo':s.theme === 'Neo','mcpskins-soft':s.theme === 'Soft'}" :style="palette">
             <header class="mcpskins-header">
                 <div class="mcpskins-brand"><strong>{{pluginTitle}}</strong><button v-if="s.update" type="button" class="mcpskins-update-button" @click="command('openUpdate')" :title="'Update available: v' + s.update.version + '. Open GitHub release.'" :aria-label="'Update available: v' + s.update.version + '. Open GitHub release.'"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 16V3m-5 5l5-5 5 5M4 16v5h16v-5"/></svg></button><span class="mcpskins-muted"> · Made by Mjonter</span></div>
                 <div class="mcpskins-pack-heading">
@@ -124,6 +169,7 @@ function panelComponent(controller) {
                         <button type="button" class="mcpskins-secondary mcpskins-health-button" @click="command('healthCheck')" :data-health="s.health.status" :title="healthTitle" :aria-label="healthTitle"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false"><path v-if="s.health.status === 'error'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/><template v-else-if="s.health.status === 'warning'"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 3L2 21h20z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 9v5m0 3v.2"/></template><path v-else-if="s.health.status === 'good'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M4 12l5 5L20 6"/><path v-else fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" d="M12 3a9 9 0 100 18 9 9 0 000-18"/></svg></button>
                     </template>
                     <button type="button" class="mcpskins-secondary" @click="command('configure')" title="Choose pack directory and namespace">Select Pack</button>
+                    <button type="button" class="mcpskins-secondary mcpskins-help-button" @click="command('showSettings')" title="Settings" aria-label="Settings"><img :src="settingsIcon" alt="" aria-hidden="true"></button>
                 </div>
             </header>
             <div v-if="!s.ready" class="mcpskins-empty">
@@ -134,7 +180,7 @@ function panelComponent(controller) {
                 <p class="mcpskins-path" :title="s.directory">{{s.folder}} / {{s.namespace}}<br>{{s.directory}}</p>
                 <p v-if="s.notice" class="mcpskins-notice" role="status">{{s.notice}}</p>
                 <details v-if="s.warnings.length" class="mcpskins-warnings"><summary>{{s.warnings.length}} file(s) skipped</summary><p v-for="warning in s.warnings.slice(0, 10)">{{warning}}</p></details>
-                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" @click="command('openRarities')">Rarities</button></div>
+                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" title="Edit TACZ gun pack directory" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" title="Edit and create rarities" @click="command('openRarities')">Rarities</button><button type="button" title="Edit collection metadata for CollectionCases mod" @click="command('openCollections')">Collection Cases</button></div>
                 <details v-if="s.gunPackWarnings.length" class="mcpskins-warnings"><summary>{{s.gunPackWarnings.length}} gun-pack warning(s)</summary><p v-for="warning in s.gunPackWarnings.slice(0, 20)">{{warning}}</p></details>
                 <div class="mcpskins-workspace">
                     <section class="mcpskins-browser" aria-label="Skin browser">
@@ -144,7 +190,7 @@ function panelComponent(controller) {
                             <select v-model="s.rarityFilter" aria-label="Filter by rarity"><option value="">All rarities</option><option v-for="rarity in rarities" :key="rarity.id" :value="rarity.id">{{rarity.name}}</option></select>
                             <select v-model="s.collectionFilter" aria-label="Filter by collection" title="Filter by collection"><option value="">All</option><option v-for="collection in collections" :key="collection" :value="collection">{{collection}}</option></select>
                         </div>
-                        <div class="mcpskins-table-wrap" tabindex="0" aria-label="Skin list. Use arrow keys to navigate.">
+                        <div ref="skinList" class="mcpskins-table-wrap" :style="listStyle" tabindex="0" aria-label="Skin list. Use arrow keys to navigate.">
                             <table class="mcpskins-table" aria-multiselectable="true" role="grid">
                                 <thead><tr><th v-for="column in [['gun','Weapon'],['name','Skin'],['rarity','Rarity'],['collection','Collection'],['file','File'],['is_new','New'],['progress','Progress']]" :key="column[0]" :aria-sort="s.sortColumn === column[0] ? (s.descending ? 'descending' : 'ascending') : 'none'"><button type="button" @click="sort(column[0])">{{heading(column[0], column[1])}}</button></th></tr></thead>
                                 <tbody><tr v-for="row in rows" :key="row.key" :data-skin-key="rowToken(row)" :class="{selected:s.selectedKeys.includes(row.key)}" :tabindex="tabRowKey === row.key ? 0 : -1" :aria-selected="s.selectedKeys.includes(row.key)" @click="select(row,$event)" @keydown.enter.prevent="select(row,$event)" @keydown.space.prevent="select(row,$event)" @contextmenu="context(row,$event)">
@@ -153,7 +199,8 @@ function panelComponent(controller) {
                             </table>
                             <p v-if="!rows.length" class="mcpskins-empty">{{s.missing ? 'No skins directory yet. Save a new skin to create it.' : s.rows.length ? 'No skins match these filters.' : 'No skins found. Create a new skin to begin.'}}</p>
                         </div>
-                        <footer class="mcpskins-browser-footer"><span class="mcpskins-muted">{{rows.length}} of {{s.rows.length}} skins · {{fileCount}} files<span v-if="s.selectedKeys.length"> / {{s.selectedKeys.length}} selected</span></span><div><button type="button" class="mcpskins-secondary" @click="command('newSkin')">New Skin</button></div></footer>
+                        <div class="mcpskins-list-resize" role="separator" aria-label="Resize skin list" aria-orientation="horizontal" :aria-valuemin="Math.min(120,listMaximum)" :aria-valuemax="listMaximum" :aria-valuenow="listHeight || undefined" tabindex="0" title="Drag to resize the list. Double-click to reset. Use Up/Down arrows to resize or Enter to reset." @pointerdown="resizeList" @dblclick="resetListSize" @keydown="resizeListKey"><span></span></div>
+                        <footer class="mcpskins-browser-footer"><span class="mcpskins-muted">{{rows.length}} of {{s.rows.length}} skins · {{fileCount}} files<span v-if="s.selectedKeys.length"> / {{s.selectedKeys.length}} selected</span></span><div><button type="button" class="mcpskins-secondary" title="Create a new skin entry" @click="command('newSkin')">New Skin</button></div></footer>
                     </section>
                     <section class="mcpskins-inspector" aria-label="Asset inspector">
                         <h3>Asset Inspector <span v-if="s.dirty" class="mcpskins-dirty">Unsaved</span></h3>
@@ -199,6 +246,7 @@ function panelComponent(controller) {
                                 </form>
                                 <details v-if="!bulk" class="mcpskins-previews" open><summary>Textures</summary>
                                     <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button></div>
+                                    <div v-if="['gun','attachment'].includes(s.draft.kind)" class="mcpskins-model-mode"><button type="button" :disabled="!s.selectedKey || s.dirty || s.duplicatePending" @click="command('toggleCustomModel')" :title="s.customModel ? 'Disable the geometry override and keep the model as an editing reference' : 'Enable this skin geometry as an in-game model override'">{{s.customModel ? 'Use Stock Model' : 'Use Custom Model'}}</button><small class="mcpskins-muted">{{s.customModel ? 'Custom geometry is enabled in game.' : 'Stock geometry in game. Open Model uses an editing reference.'}}</small></div>
                                     <figure v-for="card in s.previews" :key="card.kind"><figcaption>{{card.label}}</figcaption><div :class="['mcpskins-preview',card.kind]"><img v-if="card.source" :src="card.source" :alt="card.filename" @load="imageLoaded(card,$event)" @error="imageFailed(card)"><span v-else>{{card.message}}<small v-if="card.ratio" class="mcpskins-aspect">Recommended aspect ratio {{card.ratio}}</small></span></div><p class="mcpskins-muted">{{card.filename}}<br>{{card.dimensions}}</p></figure>
                                     <div class="mcpskins-asset-actions mcpskins-animation-action"><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
                                 </details>
@@ -207,7 +255,7 @@ function panelComponent(controller) {
                     </section>
                 </div>
             </template>
-            <footer class="mcpskins-theme"><label>Panel theme <select :value="s.theme" @change="changeTheme"><option v-for="theme in themes" :value="theme">{{theme}}</option></select></label><button type="button" @click="command('showShortcuts')" title="Show keyboard shortcuts">Keyboard Shortcuts</button></footer>
+            <footer class="mcpskins-theme"><button type="button" @click="command('showShortcuts')" title="Show keyboard shortcuts">Keyboard Shortcuts</button></footer>
         </div>`
     };
 }

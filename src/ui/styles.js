@@ -22,7 +22,7 @@ module.exports = `
 .mcpskins-rarity-toolbar {display:flex;gap:6px;align-items:center;margin-bottom:8px}
 .mcpskins-rarity-toolbar input {flex:1;min-width:60px}
 .mcpskins-rarity-manager button {min-width:0;white-space:nowrap}
-.mcpskins-rarity-manager input:not([type=checkbox]),.mcpskins-rarity-manager select {box-sizing:border-box;min-height:28px;max-width:100%;font:inherit;color:var(--color-text);background:var(--color-dark);border:1px solid var(--color-border);border-radius:3px;padding:4px 7px}
+.mcpskins-rarity-manager input:not([type=checkbox]),.mcpskins-rarity-manager select,.mcpskins-rarity-manager textarea {box-sizing:border-box;min-height:28px;max-width:100%;font:inherit;color:var(--color-text);background:var(--color-dark);border:1px solid var(--color-border);border-radius:3px;padding:4px 7px}
 .mcpskins-rarity-scroll {overflow:auto;max-height:55vh;border:1px solid var(--color-border);border-radius:4px}
 .mcpskins-rarity-manager table {border-collapse:collapse;width:100%;text-align:left}
 .mcpskins-rarity-manager th,.mcpskins-rarity-manager td {padding:8px;border-bottom:1px solid var(--color-border);overflow-wrap:anywhere}
@@ -46,6 +46,11 @@ module.exports = `
 .mcpskins-rarity-target {display:grid;grid-template-columns:minmax(100px,1fr) 70px auto;gap:6px;align-items:end;margin-bottom:8px}
 .mcpskins-rarity-targets {border:1px solid var(--color-border);padding:8px;border-radius:4px}
 @container (max-width:650px) {.mcpskins-rarity-layout {grid-template-columns:1fr}.mcpskins-rarity-inspector {border-left:0;border-top:1px solid var(--color-border);padding:12px 0 0}}
+.mcpskins-collections textarea {width:100%;resize:vertical}
+.mcpskins-collection-advanced {border:1px solid var(--color-border);border-radius:4px;padding:8px}
+.mcpskins-collection-advanced summary,.mcpskins-collection-odds summary {cursor:pointer;font-weight:600}
+.mcpskins-collection-advanced label {margin:9px 0}
+.mcpskins-collection-odds {border-top:1px solid var(--color-border);padding-top:8px}
 .mcpskins-recent-packs {margin:18px 0 0}
 .mcpskins-recent-packs .mcpskins-new-pack {margin-bottom:14px}
 .mcpskins-recent-packs h3 {font-size:14px;margin:0 0 8px}
@@ -103,6 +108,37 @@ module.exports = `
 .mcpskins-pack-heading > .mcpskins-secondary {flex-shrink:0}
 .mcpskins .mcpskins-pack-heading > .mcpskins-health-button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;max-height:28px;padding:0}
 .mcpskins-health-button svg {display:block;flex-shrink:0}
+.mcpskins .mcpskins-pack-heading > .mcpskins-help-button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;padding:0;font-size:17px;font-weight:700}
+.mcpskins-help-button img {display:block;width:20px;height:20px;object-fit:contain}
+.mcpskins-help p {color:var(--color-subtle_text);margin-bottom:14px}
+.mcpskins-settings {font-size:13px;max-height:76vh;overflow:auto}
+.mcpskins-settings-layout {display:grid;grid-template-columns:140px minmax(0,1fr);gap:20px;min-height:320px}
+.mcpskins-settings-tabs {display:flex;flex-direction:column;gap:5px;border-right:1px solid var(--color-border);padding-right:12px}
+.mcpskins-settings-tabs button {text-align:left;min-width:0;width:100%;padding:9px 12px}
+.mcpskins-settings-tabs button.selected {background:var(--color-selected);box-shadow:inset 3px 0 var(--color-accent)}
+.mcpskins-settings-content {min-width:0;padding-right:4px}
+.mcpskins-settings h3 {font-size:15px;font-weight:700;margin:0 0 12px}
+.mcpskins-settings-defaults > summary {display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:700;cursor:pointer;padding:0 0 10px;list-style:none}
+.mcpskins-settings-defaults > summary::-webkit-details-marker {display:none}
+.mcpskins-settings-defaults > summary::after {content:'';width:8px;height:8px;flex-shrink:0;margin:0 4px 4px 12px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg);color:var(--color-subtle_text)}
+.mcpskins-settings-defaults[open] > summary::after {transform:rotate(225deg);margin-top:4px;margin-bottom:0}
+.mcpskins-settings-assets {border-top:1px solid var(--color-border);margin-top:14px;padding-top:16px}
+.mcpskins-settings-content label {display:flex;flex-direction:column;gap:6px;margin:12px 0}
+.mcpskins-settings-content input:not([type=checkbox]),.mcpskins-settings-content select {box-sizing:border-box;width:100%;min-height:30px;padding:5px 8px;background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px}
+.mcpskins-settings-content .mcpskins-settings-check {flex-direction:row;align-items:center;gap:8px}
+.mcpskins-settings-check input[type=checkbox] {position:static;flex:0 0 24px;min-width:24px;width:24px;height:24px;margin:0;padding:0;transform:none;background:transparent;border:0}
+.mcpskins-settings p,.mcpskins-settings small {color:var(--color-subtle_text);line-height:1.5}
+.mcpskins-settings-footer {border-top:1px solid var(--color-border);margin-top:18px;padding-top:8px}
+.mcpskins-settings-footer > p {font-size:11px}
+.mcpskins-settings-reset {border-top:1px solid var(--color-border);margin-top:20px;padding-top:14px}
+.mcpskins-settings-reset button {color:#e05a5a}
+.mcpskins-help-links {display:flex;justify-content:center;gap:14px;padding:8px 0 14px}
+.mcpskins-help .mcpskins-help-links button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 72px;width:72px;min-width:72px;max-width:72px;height:72px;min-height:72px;padding:8px;margin:0;border-radius:6px}
+.mcpskins-help-links img {display:block;width:100%;height:100%;object-fit:contain}
+.mcpskins-settings-bottom-row {display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-top:16px}
+.mcpskins-settings-bottom-row .mcpskins-settings-close {min-width:100px;height:32px;margin:0}
+.mcpskins-settings-footer .mcpskins-help-links {justify-content:flex-start;gap:10px;padding:0}
+.mcpskins-settings-footer .mcpskins-help .mcpskins-help-links button {flex:0 0 40px;width:40px;min-width:40px;max-width:40px;height:40px;min-height:40px;padding:6px;border-radius:4px}
 .mcpskins .mcpskins-health-button[data-health="error"] {color:#e05a5a}
 .mcpskins .mcpskins-health-button[data-health="warning"] {color:#d4a537}
 .mcpskins .mcpskins-health-button[data-health="good"] {color:#3bbd77}
@@ -117,16 +153,21 @@ module.exports = `
 .mcpskins-filters select {max-width:130px}
 .mcpskins .mcpskins-filters > .mcpskins-refresh-button {display:inline-flex;align-items:center;justify-content:center;align-self:center;flex:0 0 28px;width:28px;min-width:28px;max-width:28px;height:28px;min-height:28px;max-height:28px;padding:0}
 .mcpskins-refresh-button svg {display:block;flex-shrink:0}
-.mcpskins-table-wrap {overflow:auto;border:1px solid var(--mc-border);border-radius:3px;max-height:300px;min-height:100px}
+.mcpskins-table-wrap {overflow:auto;border:1px solid var(--mc-border);border-radius:3px;max-height:min(300px,var(--mc-list-limit,1200px));min-height:100px}
 .mcpskins-table {border-collapse:collapse;width:100%;text-align:left;white-space:nowrap}
 .mcpskins-table th {position:sticky;top:0;background:var(--mc-panel);z-index:1;text-align:left}
 .mcpskins-table th button {border:0;background:transparent;font-weight:bold;width:100%;text-align:left}
+.mcpskins-compact .mcpskins-table td {padding-top:3px;padding-bottom:3px;font-size:12px}
 .mcpskins-table td {padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.07);max-width:260px;overflow:hidden;text-overflow:ellipsis}
 .mcpskins-table tbody tr {cursor:pointer;user-select:none}
 .mcpskins-table tr.selected {background:var(--mc-selected);box-shadow:inset 3px 0 var(--mc-accent)}
 .mcpskins-table tr:focus-visible {outline:1px solid var(--mc-accent);outline-offset:-2px}
 .mcpskins-rarity-dot {display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;box-shadow:0 0 0 1px #0004}
 .mcpskins-browser-footer {margin:8px 0}
+.mcpskins-list-resize {display:flex;align-items:center;justify-content:center;height:12px;cursor:ns-resize;touch-action:none;user-select:none;border-radius:3px}
+.mcpskins-list-resize span {width:36px;height:3px;border-radius:2px;background:var(--mc-muted);opacity:.4;pointer-events:none}
+.mcpskins-list-resize:hover,.mcpskins-list-resize:focus-visible {background:var(--mc-selected);outline:none}
+.mcpskins-list-resize:hover span,.mcpskins-list-resize:focus-visible span {background:var(--mc-accent);opacity:1}
 .mcpskins-inspector {border-top:1px solid var(--mc-border);padding-top:10px;margin-top:10px;min-width:0}
 .mcpskins-inspector h3 {font-size:14px;margin:0 0 8px;font-weight:600}
 .mcpskins-dirty {font-size:11px;color:var(--mc-accent);margin-left:6px}
@@ -174,15 +215,16 @@ module.exports = `
 .mcpskins-title {display:block;overflow-wrap:anywhere}
 .mcpskins-color,.mcpskins-save,.mcpskins-asset-actions {display:flex;gap:6px;flex-wrap:wrap}
 .mcpskins-animation-action {margin-top:12px}
+.mcpskins-model-mode {margin-top:10px;display:flex;flex-direction:column;align-items:flex-start;gap:5px}
 .mcpskins-color input {width:100px;flex:1;min-width:80px}
 .mcpskins-color .mcpskins-swatch {width:30px;min-width:30px}
 .mcpskins-previews {margin-top:12px;min-width:0}
 .mcpskins summary {cursor:pointer;font-weight:600;padding:6px 0}
 .mcpskins-previews figure {margin:10px 0;text-align:center}
 .mcpskins-previews figcaption {text-align:left;margin-bottom:4px}
-.mcpskins-preview {height:256px;width:100%;display:flex;align-items:center;justify-content:center;background-color:var(--mc-field);background-image:linear-gradient(45deg,#8881 25%,transparent 25%),linear-gradient(-45deg,#8881 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#8881 75%),linear-gradient(-45deg,transparent 75%,#8881 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0;border:1px solid var(--mc-border);color:var(--mc-muted);overflow:hidden;padding:6px}
+.mcpskins-preview {height:var(--mc-preview-size,256px);width:100%;display:flex;align-items:center;justify-content:center;background-color:var(--mc-field);background-image:linear-gradient(45deg,#8881 25%,transparent 25%),linear-gradient(-45deg,#8881 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#8881 75%),linear-gradient(-45deg,transparent 75%,#8881 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0;border:1px solid var(--mc-border);color:var(--mc-muted);overflow:hidden;padding:6px}
 .mcpskins-aspect {display:block;font-size:11px;opacity:.7;margin-top:5px}
-.mcpskins-preview.hud {height:85px}
+.mcpskins-preview.hud {height:var(--mc-hud-size,85px)}
 .mcpskins-preview img {max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;image-rendering:pixelated}
 .mcpskins-previews p {overflow-wrap:anywhere;margin:5px 0}
 .mcpskins-empty {padding:14px 4px;white-space:normal;color:var(--mc-muted)}
@@ -245,6 +287,6 @@ module.exports = `
 .mcpskins-light .mcpskins-color .mcpskins-swatch {background-image:none}
 .mcpskins-light ::-webkit-scrollbar-track {background:var(--mc-glass-zebra)}
 .mcpskins-light ::-webkit-scrollbar-thumb {background:var(--mc-glass-scroll);border:2px solid var(--mc-glass-zebra);border-radius:8px}
-@container (min-width:500px) {.mcpskins-editor {display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,256px);gap:16px}.mcpskins-previews {margin-top:0}}
-@container (min-width:1000px) {.mcpskins-workspace {display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1fr);gap:16px}.mcpskins-inspector {border-top:0;border-left:1px solid var(--mc-border);margin-top:0;padding-top:0;padding-left:16px}.mcpskins-table-wrap {max-height:600px}}
+@container (min-width:500px) {.mcpskins-editor {display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,var(--mc-preview-size,256px));gap:16px}.mcpskins-previews {margin-top:0}}
+@container (min-width:1000px) {.mcpskins-workspace {display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1fr);gap:16px}.mcpskins-inspector {border-top:0;border-left:1px solid var(--mc-border);margin-top:0;padding-top:0;padding-left:16px}.mcpskins-table-wrap {max-height:min(600px,var(--mc-list-limit,1200px))}}
 `;

@@ -1,6 +1,7 @@
 'use strict';
 const {rowStatus} = require('../domain/status');
 const {defaultRarities, sortedRarities} = require('../domain/rarities');
+const {settingsFrom} = require('../domain/preferences');
 const {emptyDraft, draftFromRow, baseWeapon, defaultColor, weaponPrefix, equalJSON, itemKind, normalizedWeapon} = require('../domain/skin');
 
 class Manager {
@@ -10,9 +11,9 @@ class Manager {
         this.selection = [];
         this.anchorKey = '';
         this.duplicateSource = null;
-        this.state = {update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
+        this.state = {settings: settingsFrom(), update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
             gunPackItems: [], gunPackDirectory: '', gunPackMessage: '', gunPackWarnings: [], packMetadata: {title: 'Pack Name'}, directory: '', rows: [], selectedKey: '', selectedKeys: [], duplicatePending: false, mixed: {}, changedFields: [], draft: emptyDraft(), search: '', rarityFilter: '', collectionFilter: '',
-            health: {status: 'checking', errors: 0, warnings: 0}, rarities: defaultRarities(), sortColumn: 'gun', descending: false, missing: false, warnings: [], previews: [], notice: '', theme: 'Blockbench', weaponNames: {}};
+            health: {status: 'checking', errors: 0, warnings: 0}, customModel: false, rarities: defaultRarities(), sortColumn: 'gun', descending: false, missing: false, warnings: [], previews: [], notice: '', theme: 'Blockbench', weaponNames: {}};
     }
     attach(repository, result = repository.discover()) {
         this.repository = repository;
@@ -40,6 +41,10 @@ class Manager {
         this.anchorKey = '';
         this.duplicateSource = null;
         const draft = emptyDraft();
+        if (active) {
+            Object.assign(draft,this.state.settings.defaults);
+            if (!Object.hasOwn(this.state.rarities,draft.rarity)) draft.rarity = 'common';
+        }
         draft.color = defaultColor(draft.rarity, this.state.rarities);
         Object.assign(this.state, {selectedKey: '', selectedKeys: [], duplicatePending: false, mixed: {}, changedFields: [], draft, dirty: false, active});
     }

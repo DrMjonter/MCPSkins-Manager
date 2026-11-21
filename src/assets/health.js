@@ -3,15 +3,19 @@ const {isObject, baseWeapon, validWeapon, basename, BASE_KEYS, itemKind} = requi
 const {loadPackMetadata, metadataFile} = require('../storage/pack-metadata');
 const {variantIssues} = require('../domain/variants');
 const {scanRarities} = require('../storage/rarities');
+const {scanCollections, collectionIssues} = require('../storage/collections');
 const {readJSON, isFile, isDirectory} = require('../storage/files');
 
-function checkPack(fs, paths) {
+function checkPack(fs, paths, options = {}) {
     const issues = [];
     let files = 0, skins = 0;
     const add = (severity, message, filename, row = null) => issues.push({severity, message, filename,
         rowKey: row ? row.key : '', skinId: row ? String(row.skin.id ?? '') : '', registry: row ? row.filename : filename});
     const {rarities, warnings: rarityWarnings} = scanRarities(fs, paths);
     for (const warning of rarityWarnings) add('warning', warning.message, warning.filename);
+    if (options.collections !== false) try {
+        for (const issue of collectionIssues(scanCollections(fs, paths))) add(issue.severity, issue.message, issue.filename);
+    } catch (error) { add('error', 'Unable to check collections: ' + error.message, paths.pack); }
     let metadata = {};
     try { metadata = loadPackMetadata(fs, paths); } catch (error) { add('error', `Invalid pack metadata: ${error.message}`, metadataFile(paths)); }
     if (!isDirectory(fs, paths.registryDirectory)) {
@@ -56,7 +60,7 @@ function checkPack(fs, paths) {
             let canonical = null;
             try { canonical = paths.modelForSkin(weapon, skin.id, family, metadata.weapon_models || {}); } catch (error) { issue('error', error.message); }
             const models = (canonical && isFile(fs, canonical) ? [canonical] : [asset('.json'), asset('.geo.json')]).filter(file => isFile(fs, file));
-            if (!models.length) issue('warning', 'Skin geometry is missing; Open Model can create it if a source model is available.', asset('.geo.json'));
+            // Geometry is optional: texture-only skins intentionally use the stock model.
             for (const model of models) {
                 try {
                     const geo = readJSON(fs, model);
@@ -68,8 +72,9 @@ function checkPack(fs, paths) {
                 const file = asset(suffix + '.png');
                 if (!isFile(fs, file)) {
                     if (required) issue('error', 'Skin texture is missing.', file);
-                    else if (kind === 'HUD' || kind === 'Icon') issue('warning', `${kind} texture is missing (optional).`, file);
-                    else if (isFile(fs, paths.path.join(folder, basename(weapon) + suffix + '.png'))) issue('warning', `${kind} skin map is missing; a default map is available.`, file);
+                    else if (kind === 'HUD' || kind === 'Icon') {
+                        if ((kind === 'HUD' ? options.missingHud : options.missingIcon) !== false) issue('warning', `${kind} texture is missing (optional).`, file);
+                    } else if (options.missingMaps !== false && isFile(fs, paths.path.join(folder, basename(weapon) + suffix + '.png'))) issue('warning', `${kind} skin map is missing; a default map is available.`, file);
                     continue;
                 }
                 try {
@@ -97,7 +102,6 @@ function checkPack(fs, paths) {
                             }
                         } catch(error) { issue('warning','Animation metadata: '+error.message,file+'.mcmeta'); }
                     }
-                    if ((kind === 'HUD' && frameWidth !== frameHeight * 3) || (kind === 'Icon' && frameWidth !== frameHeight)) issue('warning', `${kind} aspect ratio should be ${kind === 'HUD' ? '3:1' : '1:1'}; found ${frameWidth} x ${frameHeight}.`, file);
                 } catch (error) { issue('error', `${kind} texture: ${error.message}`, file); }
             }
         });

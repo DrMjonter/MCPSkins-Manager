@@ -13,6 +13,11 @@ const {RegistryRepository} = require('./storage/registry');
 const {RarityRepository} = require('./storage/rarity-editor');
 const {RarityEditor} = require('./state/rarities');
 const {rarityComponent} = require('./ui/rarities');
+const {CollectionRepository} = require('./storage/collections');
+const {CollectionEditor} = require('./state/collections');
+const {collectionComponent} = require('./ui/collections');
+const {settingsComponent} = require('./ui/settings');
+const {SETTINGS, settingsFrom} = require('./domain/preferences');
 const {loadPackSettings, savePackSettings} = require('./storage/settings');
 const {loadPackMetadata, savePackMetadata} = require('./storage/pack-metadata');
 const {newPackPaths, createPack} = require('./storage/new-pack');
@@ -23,9 +28,9 @@ const {checkPack} = require('./assets/health');
 const {healthSnapshot, healthSummary, healthIssueKey, applyHealthIgnores} = require('./assets/health-monitor');
 const {shortcutComponent} = require('./ui/keyboard');
 const {healthComponent} = require('./ui/health');
-const {GunPackCatalog, SourceConflict, modelKey, modelOutput} = require('./gunpacks/catalog');
+const {GunPackCatalog, SourceConflict, modelKey} = require('./gunpacks/catalog');
 const {gunPackDialog, sourceDialog, itemCounts, scanSummary} = require('./ui/gunpacks');
-const {prepareSkin, assetSelection} = require('./assets/preparation');
+const {prepareSkin, modelForEditing, assetSelection} = require('./assets/preparation');
 const {previewCards} = require('./assets/previews');
 const {Desktop} = require('./integration/desktop');
 const {BlockbenchBridge} = require('./integration/blockbench');
@@ -79,8 +84,12 @@ class Controller {
         }
         this.manager.state.weaponNames = sanitizeWeaponNames(this.getStored(WEAPON_NAMES));
         const preferences = this.getStored(PREFERENCES);
+        const storedSettings = this.getStored(SETTINGS);
+        const settings = settingsFrom(storedSettings);
+        if (!storedSettings && preferences && (preferences.theme === 'Blockbench' || Object.hasOwn(THEMES,preferences.theme))) settings.appearance.theme = preferences.theme;
+        this.manager.state.settings = settings;
+        this.manager.state.theme = settings.appearance.theme;
         if (!preferences) return;
-        this.manager.state.theme = preferences.theme === 'Blockbench' || Object.hasOwn(THEMES, preferences.theme) ? preferences.theme : 'Blockbench';
         if (!preferences.root) return;
         try {
             const connection = this.readRoot(preferences.root);
@@ -248,6 +257,31 @@ class Controller {
             };
             const dialog = new Dialog('mcpskins_rarities', {title: 'Pack Rarities', width: 1040, buttons: ['Close'], confirmIndex: 0, cancelIndex: 0,
                 component: rarityComponent(editor), onConfirm: close, onCancel: close});
+            this.dialogs.add(dialog); dialog.show(); return dialog;
+        });
+    }
+    openCollections() {
+        if (!this.manager.state.ready || this.disposed) return;
+        if (this.collectionEditor) {
+            const existing = [...this.dialogs].find(dialog => dialog.id === 'mcpskins_collections');
+            if (existing) { existing.show(); return existing; }
+        }
+        return this.runTransition(() => {
+            this.removeDialog('mcpskins_collections');
+            const repository = this.manager.repository;
+            const editor = new CollectionEditor(new CollectionRepository(repository.fs, repository.paths), this.manager.state.rarities,
+                () => confirmUnsaved({title:'Unsaved collection edits', message:'Save your collection changes before continuing?'}),
+                result => {
+                    if (result.renamed) this.manager.state.collectionFilter = '';
+                    this.manager.reload(); this.remember(); this.updatePreviews(); this.updateHealth(true);
+                }, () => !this.disposed && this.manager.repository === repository && !this.manager.state.dirty);
+            this.collectionEditor = editor;
+            const close = () => {
+                editor.guard(() => { dialog.hide(); if (this.collectionEditor === editor) this.collectionEditor = null; });
+                return false;
+            };
+            const dialog = new Dialog('mcpskins_collections', {title:'Pack Collections', width:1040, buttons:['Close'], confirmIndex:0, cancelIndex:0,
+                component:collectionComponent(editor), onConfirm:close, onCancel:close});
             this.dialogs.add(dialog); dialog.show(); return dialog;
         });
     }
@@ -432,6 +466,42 @@ class Controller {
             this.manager.selectRows(rows); this.remember(); this.updatePreviews();
         });
     }
+    updateSettings(section, key, value) {
+        if (this.disposed || !Object.hasOwn(this.manager.state.settings,section) || !Object.hasOwn(this.manager.state.settings[section],key)) return;
+        if (section === 'appearance' && key === 'theme') return this.changeTheme(value);
+        const settings = this.manager.state.settings;
+        this.manager.state.settings = settingsFrom({...settings,[section]:{...settings[section],[key]:value}});
+        this.persist(SETTINGS,this.manager.state.settings);
+        if (section === 'health') {
+            this.healthStamp = null;
+            if (this.manager.state.settings.health.live) this.updateHealth(true);
+            else this.manager.state.health = {...this.manager.state.health,status:'manual'};
+        }
+    }
+    async factoryReset() {
+        if (this.disposed || this.resetPending) return false;
+        this.resetPending = true;
+        try {
+            const answer = await new Promise(resolve => Blockbench.showMessageBox({title:'Factory Reset',
+                message:'This will reset all settings. Are you sure?', buttons:['Yes','Cancel'], confirm:0, cancel:1},resolve));
+            if (answer !== 0 || this.disposed) return false;
+            const settings = settingsFrom();
+            this.manager.state.settings = settings;
+            this.manager.state.theme = settings.appearance.theme;
+            this.persist(SETTINGS,settings);
+            this.persist(PREFERENCES,{root:this.manager.state.root,theme:settings.appearance.theme});
+            this.healthStamp = null;
+            this.updateHealth(true);
+            return true;
+        } finally { this.resetPending = false; }
+    }
+    showSettings() {
+        if (this.disposed) return;
+        this.removeDialog('mcpskins_settings');
+        const dialog = new Dialog('mcpskins_settings', {title:'Settings',width:760,buttons:[],
+            component:settingsComponent(this.manager.state,(section,key,value) => this.updateSettings(section,key,value),url => { if (!this.disposed) Blockbench.openLink(url); },() => this.factoryReset(),() => dialog.hide())});
+        this.dialogs.add(dialog); dialog.show(); return dialog;
+    }
     showShortcuts() {
         this.removeDialog('mcpskins_shortcuts');
         const dialog = new Dialog('mcpskins_shortcuts', {title: 'MCPSkins Keyboard Shortcuts', width: 700, buttons: ['Close'], component: shortcutComponent()});
@@ -490,16 +560,61 @@ class Controller {
         clearTimeout(this.timer);
         if (!this.manager.state.ready || this.disposed) return;
         this.scheduleHealth();
+        this.manager.state.customModel = false;
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) { this.manager.state.previews = []; return; }
+        try {
+            const draft = this.manager.state.draft;
+            const canonical = this.manager.repository.paths.modelForSkin(draft.weapon, assetSelection(this.manager.repository.paths, draft).id, draft.kind);
+            this.manager.state.customModel = !!canonical && this.desktop.fs.existsSync(canonical);
+        } catch { /* A new skin may not have an ID yet. */ }
         try {
             this.manager.state.previews = previewCards(this.desktop.fs, this.manager.repository.paths,
                 this.manager.state.draft, this.desktop.pathToFileURL);
         } catch (error) { this.manager.state.notice = `Preview unavailable: ${error.message}`; }
     }
-    openModel(frameTexture = null) {
+    toggleCustomModel() {
+        if (!this.manager.state.selectedKey || this.manager.state.dirty || this.manager.selection.length > 1) return;
+        if (!this.manager.state.customModel) return this.openModel(null, true);
+        return this.run(() => {
+            const repository = this.manager.repository, draft = this.manager.state.draft;
+            const {folder, id} = assetSelection(repository.paths, draft);
+            const model = repository.paths.modelForSkin(draft.weapon, id, draft.kind);
+            if (!model || !repository.fs.existsSync(model)) return;
+            const reference = this.desktop.path.join(folder, id + '.geo.json');
+            if (typeof ModelProject !== 'undefined' && ModelProject.all.some(project => [model,reference].some(file => this.bridge.same(project.export_path,file) || this.bridge.same(project.save_path,file)))) {
+                throw new Error('Save and close this skin\'s model projects before switching to the stock model.');
+            }
+            repository.fs.mkdirSync(folder, {recursive:true});
+            // Preserve both copies if a separate editing reference already exists.
+            let backup = null;
+            if (repository.fs.existsSync(reference)) {
+                const directory = repository.paths.inside(repository.paths.folder, '.mcpskins_manager', 'model_backups');
+                repository.fs.mkdirSync(directory, {recursive:true});
+                backup = this.desktop.path.join(directory,id + '.geo.json');
+                for (let number=2; repository.fs.existsSync(backup); number++) backup = this.desktop.path.join(directory,id + '_' + number + '.geo.json');
+                repository.fs.copyFileSync(reference,backup,1);
+            }
+            try {
+                repository.fs.copyFileSync(model,reference);
+                repository.fs.unlinkSync(model);
+            } catch (error) {
+                if (backup) repository.fs.copyFileSync(backup,reference);
+                throw error;
+            }
+            this.manager.state.notice = 'Stock geometry will be used in game. Your model is kept as an editing reference; Use Custom Model enables it again.';
+            this.updatePreviews();
+        });
+    }
+    openModel(frameTexture = null, customModel = false) {
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) return;
         return this.run(async () => {
             const repository = this.manager.repository, draft = this.manager.state.draft;
+            if (customModel && typeof ModelProject !== 'undefined') {
+                const {folder,id} = assetSelection(repository.paths,draft);
+                const references = [this.desktop.path.join(folder,id + '.json'),this.desktop.path.join(folder,id + '.geo.json')];
+                const open = ModelProject.all.find(project => references.some(file => this.bridge.same(file,project.export_path) || this.bridge.same(file,project.save_path)));
+                if (open && (open.saved === false || (open.textures || []).some(texture => texture.saved === false))) throw new Error('Save the open model and its painted textures before enabling custom geometry.');
+            }
             let files;
             // Resolve all sources before copying. Source choices can be required for
             // referenced textures as well as the primary gun/attachment definition.
@@ -509,7 +624,7 @@ class Controller {
                 catch (error) {
                     // Existing/manual assets remain usable if a source pack was removed
                     // or its display references are broken.
-                    try { files = prepareSkin(repository.fs, repository.paths, draft); }
+                    try { files = prepareSkin(repository.fs, repository.paths, draft, null, {customModel,...this.manager.state.settings.assets}); }
                     catch { throw error; }
                     this.manager.state.notice = 'Using existing/manual assets. Gun-pack source: ' + error.message;
                     break;
@@ -518,7 +633,7 @@ class Controller {
                 try {
                     if (source && typeof ModelProject !== 'undefined') {
                         const selection = assetSelection(repository.paths, draft);
-                        const canonical = source.editorOnly ? this.desktop.path.join(selection.folder, selection.id + '.geo.json') : modelOutput(repository.paths, source.modelRef, selection.id);
+                        const canonical = modelForEditing(repository.fs, repository.paths, draft, source, customModel);
                         if (!repository.fs.existsSync(canonical)) {
                             const {folder, id} = selection;
                             const legacy = [this.desktop.path.join(folder, id + '.json'), this.desktop.path.join(folder, id + '.geo.json')];
@@ -526,7 +641,7 @@ class Controller {
                             if (open && (open.saved === false || (open.textures || []).some(texture => texture.saved === false))) throw new Error('Save the open model and its painted textures before migrating it to the MCPSkins geometry path.');
                         }
                     }
-                    files = prepareSkin(repository.fs, repository.paths, draft, source);
+                    files = prepareSkin(repository.fs, repository.paths, draft, source, {customModel,...this.manager.state.settings.assets});
                     if (source && !source.editorOnly) {
                         try {
                             const metadata = loadPackMetadata(repository.fs, repository.paths);
@@ -690,12 +805,16 @@ class Controller {
     }
     updateHealth(force = false) {
         if (this.disposed || !this.manager.state.ready || !this.manager.repository) return null;
+        if (!force && !this.manager.state.settings.health.live) {
+            if (!this.healthReport || this.healthRepository !== this.manager.repository) this.manager.state.health = {...this.manager.state.health,status:'manual'};
+            return this.healthRepository === this.manager.repository ? this.healthReport : null;
+        }
         const repository = this.manager.repository;
         let stamp, report;
         try {
             stamp = healthSnapshot(repository.fs, repository.paths);
             if (!force && this.healthRepository === repository && this.healthStamp === stamp && this.healthReport) return this.healthReport;
-            report = checkPack(repository.fs, repository.paths);
+            report = checkPack(repository.fs, repository.paths, this.manager.state.settings.health);
             let metadata = {};
             try { metadata = loadPackMetadata(repository.fs, repository.paths); } catch { /* The report already includes the metadata error. */ }
             applyHealthIgnores(report, repository.paths, metadata);
@@ -762,6 +881,8 @@ class Controller {
     changeTheme(theme) {
         if (theme !== 'Blockbench' && !Object.hasOwn(THEMES, theme)) return;
         this.manager.state.theme = theme;
+        this.manager.state.settings = {...this.manager.state.settings,appearance:{...this.manager.state.settings.appearance,theme}};
+        this.persist(SETTINGS,this.manager.state.settings);
         this.persist(PREFERENCES, {root: this.manager.state.root, theme});
         if (theme !== 'Blockbench' && this.manager.state.ready) this.run(() => atomicJSON(this.desktop.fs,
             this.desktop.path.join(this.manager.state.root, 'skin_manager_theme.json'), {theme}));

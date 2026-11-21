@@ -40,8 +40,20 @@ function copyMissing(fs, source, output, created) {
     }
 }
 
-function prepareSkin(fs, paths, draft, source = null) {
-    if (source) return prepareFromGunPack(fs, paths, draft, source);
+function modelForEditing(fs, paths, draft, source = null, custom = false) {
+    const {folder, id} = assetSelection(paths, draft);
+    const reference = paths.path.join(folder, id + '.geo.json');
+    if (source && source.editorOnly) {
+        if (custom) throw new Error('Custom geometry overrides are not supported for this item type.');
+        return reference;
+    }
+    const canonical = source ? modelOutput(paths, source.modelRef, id) : paths.modelForSkin(draft.weapon, id, draft.kind);
+    if (custom && !canonical) throw new Error('Scan the weapon source pack before enabling a custom model.');
+    return canonical && (custom || isFile(fs, canonical)) ? canonical : reference;
+}
+
+function prepareSkin(fs, paths, draft, source = null, options = {}) {
+    if (source) return prepareFromGunPack(fs, paths, draft, source, options);
     const {folder, gun, id} = assetSelection(paths, draft);
     const path = paths.path;
     if (!isDirectory(fs, folder)) throw new Error(`Texture folder does not exist: ${folder}`);
@@ -69,15 +81,22 @@ function prepareSkin(fs, paths, draft, source = null) {
     for (const [kind, suffix] of [['normal', '_n'], ['specular', '_s']]) {
         const output = path.join(folder, `${id}${suffix}.png`);
         const source = path.join(folder, `${gun}${suffix}.png`);
-        if (isFile(fs, source)) copyMissing(fs, source, output, created);
+        const enabled = kind === 'normal' ? options.createNormal !== false : options.createSpecular !== false;
+        if (enabled && isFile(fs, source)) copyMissing(fs, source, output, created);
         maps[kind] = isFile(fs, output) ? output : null;
+    }
+    if (options.customModel) {
+        const canonical = modelForEditing(fs, paths, draft, null, true);
+        fs.mkdirSync(path.dirname(canonical), {recursive:true});
+        copyMissing(fs, model, canonical, created);
+        model = canonical;
     }
     return {model, texture, ...maps, created};
 }
 
-function prepareFromGunPack(fs, paths, draft, source) {
+function prepareFromGunPack(fs, paths, draft, source, options = {}) {
     const {folder, gun, id} = assetSelection(paths, draft), path = paths.path;
-    const model = source.editorOnly ? path.join(folder, id + '.geo.json') : modelOutput(paths, source.modelRef, id);
+    const model = modelForEditing(fs, paths, draft, source, !!options.customModel);
     const texture = path.join(folder, id + '.png');
     const pending = [];
     const add = (filename, read) => {
@@ -99,6 +118,7 @@ function prepareFromGunPack(fs, paths, draft, source) {
         return isFile(fs, legacy) ? fs.readFileSync(legacy) : source.texture();
     });
     for (const [kind, suffix] of [['normal', '_n'], ['specular', '_s'], ['icon', '_icon'], ['hud', '_hud'], ['hud_empty', '_hud_empty'], ['lod', '_lod']]) {
+        if ((kind === 'normal' && options.createNormal === false) || (kind === 'specular' && options.createSpecular === false)) continue;
         if (draft.kind !== 'gun' && kind.startsWith('hud')) continue;
         add(path.join(folder, id + suffix + '.png'), () => {
             const legacy = path.join(folder, gun + suffix + '.png');
@@ -147,4 +167,4 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     return created;
 }
 
-module.exports = {assetSelection, modelForWeapon, prepareSkin, duplicateAssets};
+module.exports = {assetSelection, modelForWeapon, modelForEditing, prepareSkin, duplicateAssets};
