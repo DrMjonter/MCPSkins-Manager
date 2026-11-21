@@ -1,6 +1,10 @@
 'use strict';
 const {Manager} = require('./state/manager');
 const {VERSION} = require('./version');
+const {AnimationSession} = require('./assets/animation');
+const {canvasRaster} = require('./integration/raster');
+const {animationComponent} = require('./ui/animation');
+const {NativeAnimations,saveNativeMetadata} = require('./integration/native-animation');
 const {UpdateChecker} = require('./integration/updates');
 const {PackPaths, packDirectorySelection} = require('./domain/paths');
 const {clone, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames, isObject} = require('./domain/skin');
@@ -11,6 +15,7 @@ const {RarityEditor} = require('./state/rarities');
 const {rarityComponent} = require('./ui/rarities');
 const {loadPackSettings, savePackSettings} = require('./storage/settings');
 const {loadPackMetadata, savePackMetadata} = require('./storage/pack-metadata');
+const {newPackPaths, createPack} = require('./storage/new-pack');
 const {RECENT_PACKS, recentPacks, rememberPack} = require('./storage/recent-packs');
 const {atomicJSON, isDirectory} = require('./storage/files');
 const {STATUSES, saveStatuses} = require('./domain/status');
@@ -24,7 +29,7 @@ const {prepareSkin, assetSelection} = require('./assets/preparation');
 const {previewCards} = require('./assets/previews');
 const {Desktop} = require('./integration/desktop');
 const {BlockbenchBridge} = require('./integration/blockbench');
-const {message, confirmUnsaved, packDialog, colorDialog, namePrefixDialog} = require('./ui/dialogs');
+const {message, confirmUnsaved, packDialog, newPackDialog, colorDialog, namePrefixDialog} = require('./ui/dialogs');
 
 const GUNPACKS = 'mcpskins_asset_manager.gunpacks.v1';
 const PREFERENCES = 'mcpskins_asset_manager.preferences.v1';
@@ -35,6 +40,7 @@ class Controller {
     constructor(nativeRequire, storage = localStorage, options = {}) {
         this.manager = new Manager();
         this.updates = new UpdateChecker(VERSION, options);
+        this.nativeAnimations = new NativeAnimations(); this.animations = new Map(); this.raster = options.raster || null;
         this.desktop = new Desktop(nativeRequire);
         this.bridge = new BlockbenchBridge(this.desktop.path);
         this.storage = storage;
@@ -68,7 +74,7 @@ class Controller {
     start() {
         this.checkForUpdates();
         if (!this.healthPoll) {
-            this.healthPoll = setInterval(() => this.updateHealth(), 3000);
+            this.healthPoll = setInterval(() => { this.updateHealth(); this.animations.forEach(session => session.poll()); this.nativeAnimations.poll(); }, 3000);
             if (this.healthPoll && typeof this.healthPoll.unref === 'function') this.healthPoll.unref();
         }
         this.manager.state.weaponNames = sanitizeWeaponNames(this.getStored(WEAPON_NAMES));
@@ -341,10 +347,11 @@ class Controller {
                 const {root, folder, directory} = packDirectorySelection(this.desktop.path, values.pack_directory);
                 const namespace = String(values.pack_namespace || '').trim().toLowerCase();
                 if (!validComponent(namespace)) throw new Error('Pack Namespace must be a single folder component.');
-                const paths = new PackPaths(this.desktop.path, root, folder, namespace);
-                connection = connection && connection.packDirectory === directory ? connection : this.readPackDirectory(directory);
+                const paths = values.create_pack ? newPackPaths(this.desktop.path, root, folder, namespace) : new PackPaths(this.desktop.path, root, folder, namespace);
+                connection = values.create_pack ? this.desktop.connect(root) : connection && connection.packDirectory === directory ? connection : this.readPackDirectory(directory);
                 const switching = !s.ready || paths.root !== s.root || folder !== s.folder || namespace !== s.namespace;
                 const apply = () => {
+                    if (values.create_pack) createPack(connection.fs, paths, values);
                     const repository = new RegistryRepository(connection.fs, paths);
                     const result = switching ? repository.discover() : null;
                     savePackSettings(connection.fs, this.desktop.path, paths.root, folder, namespace);
@@ -366,7 +373,15 @@ class Controller {
                 if (switching) return this.transition(apply);
                 apply();
                 return true;
-            }, recentPacks(this.desktop.path, this.getStored(RECENT_PACKS)), (directory, author, connection) => this.savePackAuthor(directory, author, connection));
+            }, recentPacks(this.desktop.path, this.getStored(RECENT_PACKS)), (directory, author, connection) => this.savePackAuthor(directory, author, connection), submit => {
+                this.removeDialog('mcpskins_new_pack');
+                const createDialog = newPackDialog(s.root, values => {
+                    const paths = newPackPaths(this.desktop.path, values.parent_directory, values.pack_folder, values.pack_namespace);
+                    return submit({...values, pack_directory: paths.pack, pack_namespace: paths.namespace, create_pack: true}, null);
+                }, () => { if (!this.disposed) dialog.show(); });
+                this.dialogs.add(createDialog);
+                return createDialog;
+            });
         this.dialogs.add(dialog);
     }
     edit(key, value) {
@@ -481,7 +496,7 @@ class Controller {
                 this.manager.state.draft, this.desktop.pathToFileURL);
         } catch (error) { this.manager.state.notice = `Preview unavailable: ${error.message}`; }
     }
-    openModel() {
+    openModel(frameTexture = null) {
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) return;
         return this.run(async () => {
             const repository = this.manager.repository, draft = this.manager.state.draft;
@@ -538,8 +553,118 @@ class Controller {
                 }
             }
             if (!files) throw new Error('Could not resolve gun-pack assets.');
+            for(const texture of [files.texture,files.normal,files.specular].filter(Boolean)) {
+                const manifest=this.desktop.path.join(this.desktop.path.dirname(texture),this.desktop.path.basename(texture,'.png')+'_frames','animation.json');
+                if(repository.fs.existsSync(manifest)) {
+                    const session=this.animationSession(repository,texture); await session.poll();
+                    if(session.state.error) this.manager.state.notice=session.state.error;
+                }
+            }
+            if (frameTexture) {
+                if (!repository.fs.existsSync(frameTexture)) throw new Error('Frame PNG is missing.');
+                files = {...files, texture: frameTexture, normal: null, specular: null, animationFrame: true};
+            }
             this.bridge.openModel(files, repository.fs);
             this.updatePreviews();
+            return files;
+        });
+    }
+    animationSession(repository,texture) {
+        let session=this.animations.get(texture);
+        if(!session || session.disposed) {
+            if(!this.raster) this.raster=canvasRaster();
+            session=new AnimationSession(repository.fs,repository.paths,texture,this.raster,{
+                url:file=>this.desktop.pathToFileURL(file).href,
+                canWrite:files=>{
+                    if(typeof ModelProject!=='undefined') for(const project of ModelProject.all) for(const texture of project.textures || [])
+                        if(texture.saved===false && files.some(file=>this.bridge.same(texture.path,file))) throw new Error('Save the open texture edits in Blockbench before rebuilding.');
+                },
+                saved:()=>{ if(!this.disposed && this.manager.repository && this.manager.repository.paths.pack===repository.paths.pack) this.updatePreviews(); },
+                error:message=>{if(!this.disposed && this.manager.repository && this.manager.repository.paths.pack===repository.paths.pack) this.manager.state.notice='Animation: '+message;}
+            });
+            this.animations.set(texture,session);
+        }
+        return session;
+    }
+    duplicateCurrentFrame() {
+        return this.run(async ()=>{
+            const texture=this.nativeAnimations.get('Texture')?.selected;
+            let session=texture?.path ? this.animations.get(texture.path) : null;
+            if(!session && texture?.path && this.manager.selected && this.manager.selection.length===1) {
+                const repository=this.manager.repository,selection=assetSelection(repository.paths,this.manager.state.draft);
+                const paths=['','_n','_s','_icon','_hud','_hud_empty','_lod'].map(suffix=>repository.paths.path.join(selection.folder,selection.id+suffix+'.png'));
+                if(paths.some(file=>this.bridge.same(file,texture.path))) session=this.animationSession(repository,texture.path);
+            }
+            if(session) await session.preferNative();
+            if(this.nativeAnimations.get('Texture')?.selected!==texture) throw new Error('The selected texture changed. Try duplicating the current frame again.');
+            return this.nativeAnimations.duplicateCurrentFrame(session);
+        });
+    }
+    openAnimatedTextures() {
+        if (!this.manager.selected || this.manager.selection.length > 1 || this.manager.duplicateSource) return;
+        return this.run(async () => {
+            const repository=this.manager.repository, selected=this.manager.selected;
+            const selection=assetSelection(repository.paths,this.manager.state.draft);
+            if(selection.id!==selected.skin.id) throw new Error('Save the skin ID change before editing animation frames.');
+            if(!this.raster) this.raster=canvasRaster();
+            this.removeDialog('mcpskins_animation');
+            const targets=[{id:'skin',label:'Skin',suffix:''},{id:'normal',label:'Normal map',suffix:'_n'},{id:'specular',label:'Specular map',suffix:'_s'},
+                {id:'icon',label:'Icon',suffix:'_icon'},...(this.manager.state.draft.kind==='gun'?[{id:'hud',label:'HUD',suffix:'_hud'},{id:'hud_empty',label:'Empty HUD',suffix:'_hud_empty'},{id:'lod',label:'LOD',suffix:'_lod'}]:[])];
+            const getSession=target=>{
+                const value=this.animationSession(repository,this.desktop.path.join(selection.folder,selection.id+target.suffix+'.png'));
+                if(!value.running && !value.state.dirty) value.load();
+                return value;
+            };
+            let session=getSession(targets[0]);
+            await session.preferNative();
+            const state={target:'skin',targets,session:session.state,error:''};
+            const execute=async callback=>{ try { state.error=''; return await callback(); } catch(error) { state.error=error.message; return false; } };
+            const settle=async action=>{
+                if(session.running) await session.running;
+                if(session.state.dirty) {
+                    const choice=await confirmUnsaved({title:'Unsaved animation settings',message:'Save and build the animation before continuing?'});
+                    if(choice==='cancel') return false;
+                    if(choice==='save') { try { saveNativeMetadata(session,session.state);this.nativeAnimations.applySessionSettings(session); } catch(error) {session.state.error=error.message;return false;} }
+                    if(choice==='discard') session.load();
+                }
+                return action();
+            };
+            const importImages=strip=>{
+                const targetSession=session;
+                Blockbench.import({extensions:['png'],type:'PNG images',readtype:'buffer',multiple:!strip},files=>{
+                    if(!files || !files.length || this.disposed) return;
+                    execute(async ()=>{
+                        if(targetSession.options.canWrite) targetSession.options.canWrite([targetSession.texture]);
+                        await targetSession.preferNative();
+                        const frames=files.slice().sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})).map(file=>new Uint8Array(file.content));
+                        return strip ? targetSession.importStrip(frames[0]) : targetSession.importFrames(frames,true);
+                    });
+                });
+            };
+            const close=()=>{ execute(()=>settle(()=>dialog.hide())); return false; };
+            const dialog=new Dialog('mcpskins_animation',{title:'Animated Textures',width:950,buttons:['Close'],confirmIndex:0,cancelIndex:0,onConfirm:close,onCancel:close,
+                component:animationComponent(state,{
+                    target:id=>execute(()=>settle(async ()=>{ const target=targets.find(target=>target.id===id); if(!target) return; session=getSession(target); await session.preferNative(); state.target=id; state.session=session.state; })),
+                    edit:(key,value)=>session.edit(key,value),timing:(index,value)=>session.editTiming(index,value),
+                    importFrames:()=>importImages(false),importStrip:()=>importImages(true),
+                    save:()=>execute(()=>{
+                        saveNativeMetadata(session,session.state);
+                        this.nativeAnimations.applySessionSettings(session);
+                        return true;
+                    }),
+                    folder:()=>execute(()=>{ repository.fs.mkdirSync(selection.folder,{recursive:true}); return this.desktop.open(selection.folder,true); }),
+                    native:()=>execute(()=>settle(async ()=>{
+                        if(this.manager.repository!==repository || this.manager.selected!==selected) throw new Error('Select the original skin before opening its native editor.');
+                        await session.preferNative();dialog.hide();
+                        try {
+                            const files=await this.openModel(session.texture);if(!files || this.disposed) {if(!this.disposed) dialog.show();return false;}
+                            if(!session.state.dirty) session.load();
+                            await session.preferNative();
+                            return await this.nativeAnimations.open(session,(a,b)=>this.bridge.same(a,b));
+                        } catch(error) {if(!this.disposed) dialog.show();throw error;}
+                    }))
+                })});
+            this.dialogs.add(dialog); dialog.show(); return dialog;
         });
     }
     openFolder() {
@@ -667,6 +792,8 @@ class Controller {
         if (this.manager.state.dirty) this.remember();
         this.disposed = true;
         this.updates.dispose();
+        this.nativeAnimations.dispose();
+        this.animations.forEach(session => session.dispose()); this.animations.clear();
         this.cancelPrefixRequest();
         this.sourceRequests.forEach(finish => finish(null)); this.sourceRequests.clear();
         if (this.catalog) this.catalog.dispose();

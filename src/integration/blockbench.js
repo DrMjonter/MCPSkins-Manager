@@ -9,9 +9,10 @@ class BlockbenchBridge {
         const paths = [texture, normal, specular].filter(Boolean);
         const known = paths.map(filename => Texture.all.find(t => this.same(t.path, filename)));
         // Reuse in-memory painted textures without re-reading or replacing their pixels.
+        const needsApply = !!files.animationFrame || !!(project.mcpskins_asset && !this.same(project.mcpskins_asset.texture, texture));
         const needsImport = known.some(t => !t);
         const needsOrder = known.some((t, index) => t && Texture.all[index] !== t);
-        if (!needsImport && !needsOrder) { known[0].select(); return; }
+        if (!needsImport && !needsOrder && !needsApply) { known[0].select(); return; }
         const textures = Texture.all.slice();
         Undo.initEdit({textures, elements: Cube.all.slice(), texture_order: true, selected_texture: true});
         const imported = paths.map((filename, index) => {
@@ -23,7 +24,7 @@ class BlockbenchBridge {
             return entry;
         });
         const base = imported[0];
-        if (!known[0]) {
+        if (!known[0] || needsApply) {
             Cube.all.forEach(cube => cube.applyTexture(base, true));
             if (typeof base.setAsDefaultTexture === 'function') base.setAsDefaultTexture();
         }

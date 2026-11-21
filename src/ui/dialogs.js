@@ -12,12 +12,12 @@ function confirmUnsaved(options = {}) {
     }, result => resolve(result === 0 ? 'save' : result === 1 ? 'discard' : 'cancel')));
 }
 
-function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {}) {
+function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {}, createPack = null) {
     let applying = false;
     const submit = (values, connection) => {
         if (applying) return;
         applying = true;
-        return Promise.resolve(apply(values, connection)).then(ok => { if (ok) dialog.hide(); })
+        return Promise.resolve(apply(values, connection)).then(ok => { if (ok) dialog.hide(); return ok; })
             .catch(error => message('Pack not applied', error.message)).finally(() => { applying = false; });
     };
     const dialog = new Dialog('mcpskins_pack', {
@@ -29,7 +29,7 @@ function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {
             connection = null;
             dialog.setFormValues({pack_directory: entry.directory, pack_namespace: entry.namespace, pack_author: currentAuthor});
             return submit({pack_directory: entry.directory, pack_namespace: entry.namespace}, null);
-        }),
+        }, createPack ? () => createPack(submit) : null),
         form: {
             pack_directory: {label: 'Pack Directory', type: 'folder', value: initial.directory},
             pack_namespace: {label: 'Pack Namespace', type: 'text', value: initial.namespace},
@@ -67,11 +67,12 @@ function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {
     return dialog;
 }
 
-function recentPacksComponent(entries, select) {
+function recentPacksComponent(entries, select, createPack = null) {
     return {
-        data() { return {entries}; },
-        methods: {select(entry) { return select(entry); }},
+        data() { return {entries, canCreate: !!createPack}; },
+        methods: {select(entry) { return select(entry); }, createPack() { if (createPack) return createPack(); }},
         template: `<section class="mcpskins-recent-packs">
+            <button v-if="canCreate" class="mcpskins-new-pack" type="button" @click="createPack">New Pack</button>
             <h3>Recent Packs</h3>
             <div v-if="entries.length" class="mcpskins-recent-scroll"><table>
                 <thead><tr><th>Name</th><th>Author</th><th>Path</th></tr></thead>
@@ -82,6 +83,31 @@ function recentPacksComponent(entries, select) {
             <p v-else class="mcpskins-muted">Selected packs will appear here.</p>
         </section>`
     };
+}
+
+function newPackDialog(root, create, cancel = () => {}) {
+    let applying = false;
+    const dialog = new Dialog('mcpskins_new_pack', {
+        title: 'New MCPSkins Pack', width: 640,
+        confirm_text: 'Create Pack',
+        form: {
+            parent_directory: {label: 'Parent Directory', type: 'folder', value: root || '', description: 'Choose your mcpskins directory. The new pack folder will be created inside it.'},
+            pack_folder: {label: 'Folder Name', type: 'text', value: '', placeholder: 'my_pack'},
+            pack_namespace: {label: 'Namespace', type: 'text', value: 'my_pack'},
+            pack_title: {label: 'Pack Name', type: 'text', value: 'Pack Name'},
+            pack_author: {label: 'Author', type: 'text', value: '', placeholder: '(Optional)'}
+        },
+        onCancel() { queueMicrotask(cancel); },
+        onConfirm(values) {
+            if (applying) return false;
+            applying = true;
+            Promise.resolve().then(() => create(values)).then(ok => { if (ok) dialog.hide(); })
+                .catch(error => message('Pack not created', error.message)).finally(() => { applying = false; });
+            return false;
+        }
+    });
+    dialog.show();
+    return dialog;
 }
 
 function colorDialog(color, apply) {
@@ -116,4 +142,4 @@ function namePrefixDialog(weapon, accept, cancel) {
     return dialog;
 }
 
-module.exports = {recentPacksComponent, message, confirmUnsaved, packDialog, colorDialog, namePrefixDialog};
+module.exports = {recentPacksComponent, message, confirmUnsaved, packDialog, newPackDialog, colorDialog, namePrefixDialog};

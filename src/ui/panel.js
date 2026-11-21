@@ -200,6 +200,7 @@ function panelComponent(controller) {
                                 <details v-if="!bulk" class="mcpskins-previews" open><summary>Textures</summary>
                                     <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button></div>
                                     <figure v-for="card in s.previews" :key="card.kind"><figcaption>{{card.label}}</figcaption><div :class="['mcpskins-preview',card.kind]"><img v-if="card.source" :src="card.source" :alt="card.filename" @load="imageLoaded(card,$event)" @error="imageFailed(card)"><span v-else>{{card.message}}<small v-if="card.ratio" class="mcpskins-aspect">Recommended aspect ratio {{card.ratio}}</small></span></div><p class="mcpskins-muted">{{card.filename}}<br>{{card.dimensions}}</p></figure>
+                                    <div class="mcpskins-asset-actions mcpskins-animation-action"><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
                                 </details>
                             </div>
                         </template>

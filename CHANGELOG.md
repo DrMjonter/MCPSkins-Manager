@@ -1,17 +1,30 @@
 # MCPSkins Manager
 
+## 1.3.0
+
+### Major Changes
+
+- Add animated texture tools with native Blockbench Flipbook editing and importing multiple PNG frames into a stitched texture.
+- Support per-frame timing in `.png.mcmeta`, including repeated frames and preserving timing through frame reordering and duplication.
+- Add New Pack to Select Pack to create the folder structure and save the pack title and author.
+
+### Quality of Life
+
+- Add Duplicate Current Frame as a toolbar action for quickly extending animated textures while painting.
+- Keep animation preparation, duplication, and health checks aware of animated texture files.
+
 ## 1.2.0
 
 ### Major Changes
 
 - **Gun pack scanning:** Find weapons and attachments in TaCZ folders and ZIP packs, plus melee weapons, throwables, and consumables from installed LesRaisins JARs. Discovered IDs appear in the weapon dropdown.
-- **Automatic asset preparation:** Open Model finds the source geometry and creates skin-specific copies of missing textures, normal/specular maps, icons, and available HUD/LOD textures. Existing skin files are kept.
+- **Automatic asset preparation:** Finds the source geometry and creates skin-specific copies of missing textures, normal/specular maps, icons, and available HUD/LOD textures. Existing skin files are kept.
 - **LesRaisins editing:** Prepare geometry, UV textures, icons, and available maps for melee weapons, throwables, and consumables. Geometry is a Blockbench editing reference; MCPSkins currently applies texture and icon changes to these items.
 - **Variants and leveling:** Group skins as variants and set level rewards using kill, headshot, and player-kill goals. Renaming a skin updates its variant links, and duplicates start with empty variant and level lists.
 - **More skin fields:** Add skin authors, subtitles, and Limited Edition badges. Skin authors stay separate from the pack author, with support for registry-file author defaults.
 - **Rarity manager:** Create custom tiers or override built-in ones. Edit names, colors, order, translation keys, fusion costs, and fusion targets, including weighted targets. Rarity dropdowns, sorting, and default colors use the selected pack's definitions.
-- **Live pack health:** The header icon updates automatically as saved files change: red for errors, yellow for warnings, and green when there are no active issues. Ignore individual findings per pack and restore them later.
-- **Update checker:** Check GitHub at startup and show a clickable icon when a newer stable release is available.
+- **Live pack health:** The header icon updates automatically as saved files change: red for errors, yellow for warnings, and green when there are no active issues. Ignore individual warnings per pack and restore them later if you need to.
+- **Update checker:** Notifies you when a new version is pushed to github.
 
 ### Quality of Life
 

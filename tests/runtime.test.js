@@ -353,6 +353,68 @@ test('nonexistent pack directory cannot be applied or create parent settings', a
     assert.equal(fs.existsSync(path.join(root, 'skin_manager_settings.json')), false);
 });
 
+test('New Pack creates the layout, saves metadata, opens it, and remembers it', async t => {
+    const {controller, root, local} = setup(t);
+    const dialogs = dialogEnvironment(t);
+    controller.configure();
+    const select = dialogs.at(-1);
+    select.options.component.methods.createPack();
+    const dialog = dialogs.at(-1);
+    assert.equal(dialog.id, 'mcpskins_new_pack');
+    dialog.options.onConfirm({parent_directory: root, pack_folder: 'TeamPack', pack_namespace: 'TEAM', pack_title: 'Team Skins', pack_author: 'Our Team'});
+    await new Promise(resolve => setImmediate(resolve));
+    const pack = path.join(root, 'TeamPack');
+    assert.equal(dialog.visible, false);
+    assert.equal(select.visible, false);
+    assert.equal(controller.manager.repository.paths.pack, pack);
+    for (const relative of ['data/team/skins', 'data/team/skin_rarities', 'data/team/skin_lang', 'assets/mcpskins/textures/skins']) {
+        assert.ok(fs.statSync(path.join(pack, relative)).isDirectory());
+    }
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pack, 'mcpskins_manager.json'), 'utf8')), {title: 'Team Skins', author: 'Our Team'});
+    assert.equal(controller.manager.state.rows.length, 0);
+    assert.equal(controller.manager.state.packMetadata.title, 'Team Skins');
+    assert.equal(JSON.parse(local.getItem('mcpskins_asset_manager.recent_packs.v1'))?.[0]?.directory, pack);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'skin_manager_settings.json'), 'utf8')).pack_namespace, 'team');
+});
+
+test('canceling unsaved edits during New Pack leaves the filesystem untouched', async t => {
+    const {controller, root, globals} = setup(t);
+    const dialogs = dialogEnvironment(t);
+    controller.manager.clear();
+    controller.edit('label', 'Keep me');
+    controller.configure();
+    dialogs.at(-1).options.component.methods.createPack();
+    const dialog = dialogs.at(-1);
+    dialog.options.onConfirm({parent_directory: root, pack_folder: 'Canceled', pack_namespace: 'test'});
+    await new Promise(resolve => setImmediate(resolve));
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fs.existsSync(path.join(root, 'Canceled')), false);
+    assert.equal(fs.existsSync(path.join(root, 'skin_manager_settings.json')), false);
+    assert.equal(controller.manager.state.draft.label, 'Keep me');
+    assert.equal(dialog.visible, true);
+});
+
+test('New Pack rejects existing folders and unsafe names without changing their contents', t => {
+    const {root} = setup(t);
+    const {newPackPaths, createPack} = require('../src/storage/new-pack');
+    const paths = newPackPaths(path, root, 'Existing', 'example');
+    fs.mkdirSync(paths.pack);
+    fs.writeFileSync(path.join(paths.pack, 'keep.json'), 'original');
+    assert.throws(() => createPack(fs, paths), /already exists/);
+    assert.deepEqual(fs.readdirSync(paths.pack), ['keep.json']);
+    assert.equal(fs.readFileSync(path.join(paths.pack, 'keep.json'), 'utf8'), 'original');
+    for (const folder of ['../escape', 'a/b', 'CON', 'nul.txt', 'bad.']) assert.throws(() => newPackPaths(path, root, folder, 'example'));
+    for (const namespace of ['../escape', 'a/b', 'has space', 'bad:namespace']) assert.throws(() => newPackPaths(path, root, 'Good', namespace));
+    const fresh = newPackPaths(path, root, 'Fresh', 'fresh');
+    const failing = Object.create(fs);
+    failing.mkdirSync = directory => { if (directory.endsWith('skin_rarities')) throw new Error('Disk full'); fs.mkdirSync(directory); };
+    assert.throws(() => createPack(failing, fresh), /Disk full/);
+    assert.equal(fs.existsSync(fresh.pack), false);
+    createPack(fs, fresh);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(fresh.pack, 'mcpskins_manager.json'), 'utf8')).title, 'Pack Name');
+});
+
 test('start-screen launcher opens the complete manager without creating a model project', t => {
     const {controller} = setup(t);
     const {environment, views, sections, element} = startScreenEnvironment();
@@ -653,7 +715,7 @@ test('generated plugin registers, loads, cleans up and reloads without leaking h
     }
     const context = {console, setTimeout, clearTimeout, setInterval, clearInterval, requireNativeModule: name => require(name),
         localStorage: storage(), Plugin: {register(id, options) { assert.equal(id, 'mcpskins_asset_manager'); plugin = options; }},
-        Action, Panel, Toolbar: class { delete() {} }, MenuBar: {addAction(_action, location) { menus.push(location); }},
+        Action, Panel, Keybind: class {constructor(options) {Object.assign(this,options);}}, Toolbar: class { delete() {} }, MenuBar: {addAction(_action, location) { menus.push(location); }},
         document: environment.document, Vue: environment.Vue, StartScreen: environment.startScreen,
         Blockbench: {Project: 0, addCSS() { counts.css++; return {delete() { counts.css--; }}; }},
         window: {addEventListener(name, handler) { listeners.set(name, handler); }, removeEventListener(name, handler) { assert.equal(listeners.get(name), handler); listeners.delete(name); }}};
@@ -663,7 +725,10 @@ test('generated plugin registers, loads, cleans up and reloads without leaking h
     for (let i = 0; i < 2; i++) {
         plugin.onload();
         assert.equal(listeners.size, 2);
-        assert.deepEqual(counts, {actions: 6, panels: 1, css: 1});
+        assert.deepEqual(counts, {actions: 7, panels: 1, css: 1});
+        assert.equal(registered.get('mcpskins_duplicate_texture_frame').name, 'Duplicate Current Frame');
+        assert.equal(registered.get('mcpskins_duplicate_texture_frame').category, 'textures');
+        assert.equal(registered.get('mcpskins_duplicate_texture_frame').keybind.key, -1);
         assert.deepEqual(menus.slice(-2), ['tools', 'file']);
         registered.get('mcpskins_show').click();
         assert.equal(views.at(-1).state.ready, false);
@@ -2038,12 +2103,12 @@ test('startup update check works without a selected pack and the native header i
     const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
     const icon = () => flatten(panel._render()).find(node => node.data?.staticClass?.includes('mcpskins-update-button'));
     assert.equal(icon(), undefined);
-    finish({ok: true, json: async () => ({tag_name: 'v1.3.0'})});
+    finish({ok: true, json: async () => ({tag_name: 'v999.0.0'})});
     await controller.checkForUpdates();
     assert.equal(calls, 1);
-    assert.ok(icon().data.attrs.title.includes('v1.3.0'));
+    assert.ok(icon().data.attrs.title.includes('v999.0.0'));
     icon().data.on.click();
-    assert.equal(opened, 'https://github.com/DrMjonter/MCPSkins-Manager/releases/tag/v1.3.0');
+    assert.equal(opened, 'https://github.com/DrMjonter/MCPSkins-Manager/releases/tag/v999.0.0');
     panel.$destroy();
 });
 
@@ -2052,4 +2117,42 @@ test('unloading the plugin cancels an in-flight update check and keeps the updat
     const controller = new Controller(nativeRequire, storage(), {fetch: () => new Promise(() => {})});
     controller.start(); const pending = controller.checkForUpdates(); controller.dispose();
     assert.equal(await pending, null); assert.equal(controller.manager.state.update, null);
+});
+
+
+test('animation dialog prefers native editing and still imports multiple frames in numeric order',async t=>{
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller,png,globals}=healthySavedPack(t),dialogs=dialogEnvironment(t);
+    const inputs=[];controller.raster={stitch:async(frames,size)=>{inputs.push(frames);return png(size.width,size.height*frames.length);}};
+    controller.manager.select(controller.manager.state.rows[0]);await controller.openAnimatedTextures();
+    const dialog=dialogs.at(-1),component=dialog.options.component,errors=[];
+    Vue.config.warnHandler=message=>errors.push(message);Vue.config.errorHandler=error=>errors.push(error.message);
+    const view=new Vue({...component,...Vue.compile(component.template)});
+    const flatten=node=>[node,...(node.children||[]).flatMap(flatten)],text=node=>(node.text||'')+(node.children||[]).map(text).join('');
+    assert.ok(flatten(view._render()).some(node=>node.tag==='button'&&text(node)==='Open Flipbook Editor'));
+    assert.equal(flatten(view._render()).some(node=>node.tag==='button'&&text(node)==='Edit Frame in Blockbench'),false);
+    let importOptions,importCallback;globals.Blockbench.import=(options,callback)=>{importOptions=options;importCallback=callback;};
+    view.importFrames();assert.equal(importOptions.multiple,true);assert.equal(importOptions.readtype,'buffer');
+    const two=png(32,32),ten=png(32,32);two[8]=2;ten[8]=10;
+    importCallback([{name:'frame_10.png',content:ten},{name:'frame_2.png',content:two}]);await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(inputs[0][0][8],2);assert.equal(inputs[0][1][8],10);
+    const session=[...controller.animations.values()][0];assert.equal(session.state.mode,'native');
+    view.edit('frametime',{target:{type:'number',value:'4'}});view.edit('interpolate',{target:{type:'checkbox',checked:true}});
+    assert.equal(await view.save(),true);assert.equal(JSON.parse(fs.readFileSync(session.metadata,'utf8')).animation.frametime,4);
+    assert.equal(view.s.timings.length,2);
+    view.timing(1,{target:{value:'20'}});assert.ok(view._render());assert.equal(await view.save(),true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(session.metadata,'utf8')).animation.frames,[0,{index:1,time:20}]);
+    let opened;controller.nativeAnimations.open=async value=>{opened=value;return true;};controller.bridge.openModel=()=>{};
+    await view.native();assert.equal(opened,session);assert.equal(dialog.visible,false);assert.equal(session.state.mode,'native');
+    assert.deepEqual(errors,[]);assert.ok(view._render());view.$destroy();
+});
+
+test('switching between already-loaded animation frames updates the model texture without re-reading painted pixels',t=>{
+    setup(t);const {TestTexture,reads,applied}=textureEnvironment(t),bridge=new BlockbenchBridge(path);t.after(()=>bridge.dispose());
+    const one=new TestTexture({path:path.resolve('skin_frames/skin_1.png')}),two=new TestTexture({path:path.resolve('skin_frames/skin_2.png')});
+    TestTexture.all.push(one,two);const project={mcpskins_asset:{texture:one.path}};
+    bridge.bindTexture(project,{model:path.resolve('skin.geo.json'),texture:two.path,animationFrame:true});
+    assert.equal(applied.at(-1),two);
+    bridge.bindTexture(project,{model:path.resolve('skin.geo.json'),texture:one.path,animationFrame:true});
+    assert.equal(applied.at(-1),one);assert.deepEqual(reads,[]);
 });

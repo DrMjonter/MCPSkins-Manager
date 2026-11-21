@@ -34,9 +34,15 @@ module.exports = function register(nativeRequire) {
                 condition: () => !ready || (controller.manager.state.ready &&
                     (!['mcpskins_save', 'mcpskins_discard'].includes(id) || controller.manager.state.active))
             }));
+            actions.push(new Action('mcpskins_duplicate_texture_frame', {
+                name: 'Duplicate Current Frame', description: 'Append a copy of the current texture frame and select it for painting.',
+                icon: 'content_copy', category: 'textures', keybind: new Keybind({key: -1}),
+                condition: () => controller.nativeAnimations.canDuplicateCurrentFrame(),
+                click: () => controller.duplicateCurrentFrame()
+            }));
             MenuBar.addAction(actions[0], 'tools');
             MenuBar.addAction(actions[0], 'file');
-            toolbar = new Toolbar('mcpskins_asset_toolbar', {children: ['mcpskins_pack', 'mcpskins_new', 'mcpskins_refresh', 'mcpskins_save', 'mcpskins_discard']});
+            toolbar = new Toolbar('mcpskins_asset_toolbar', {children: ['mcpskins_pack', 'mcpskins_new', 'mcpskins_refresh', 'mcpskins_save', 'mcpskins_discard', 'mcpskins_duplicate_texture_frame']});
             css = Blockbench.addCSS(styles);
             panel = new Panel('mcpskins_asset_manager', {
                 name: PLUGIN_TITLE, icon: 'inventory_2',

@@ -79,7 +79,25 @@ function checkPack(fs, paths) {
                     const integer = offset => bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3];
                     const width = integer(16), height = integer(20);
                     if (!width || !height) throw new Error('Invalid image dimensions.');
-                    if ((kind === 'HUD' && width !== height * 3) || (kind === 'Icon' && width !== height)) issue('warning', `${kind} aspect ratio should be ${kind === 'HUD' ? '3:1' : '1:1'}; found ${width} x ${height}.`, file);
+                    let frameWidth=width, frameHeight=height;
+                    if(isFile(fs,file+'.mcmeta')) {
+                        try {
+                            const metadata=readJSON(fs,file+'.mcmeta'), animation=metadata.animation;
+                            if(animation!==undefined) {
+                                if(!isObject(animation)) throw new Error('Expected an animation object.');
+                                frameWidth=animation.width ?? Math.min(width,height); frameHeight=animation.height ?? Math.min(width,height);
+                                if(!Number.isSafeInteger(frameWidth) || frameWidth<1 || !Number.isSafeInteger(frameHeight) || frameHeight<1 || width%frameWidth || height%frameHeight) throw new Error('Frame dimensions must divide the image dimensions.');
+                                if(animation.frametime!==undefined && (!Number.isSafeInteger(animation.frametime) || animation.frametime<1)) throw new Error('Frame time must be a positive whole number.');
+                                if(animation.interpolate!==undefined && typeof animation.interpolate!=='boolean') throw new Error('Interpolation must be true or false.');
+                                const count=width/frameWidth*(height/frameHeight);
+                                if(animation.frames!==undefined && (!Array.isArray(animation.frames) || !animation.frames.length || animation.frames.some(frame=>{
+                                    const index=isObject(frame)?frame.index:frame;
+                                    return !Number.isSafeInteger(index) || index<0 || index>=count || (isObject(frame) && frame.time!==undefined && (!Number.isSafeInteger(frame.time) || frame.time<1));
+                                }))) throw new Error('Animation contains invalid frame indices or durations.');
+                            }
+                        } catch(error) { issue('warning','Animation metadata: '+error.message,file+'.mcmeta'); }
+                    }
+                    if ((kind === 'HUD' && frameWidth !== frameHeight * 3) || (kind === 'Icon' && frameWidth !== frameHeight)) issue('warning', `${kind} aspect ratio should be ${kind === 'HUD' ? '3:1' : '1:1'}; found ${frameWidth} x ${frameHeight}.`, file);
                 } catch (error) { issue('error', `${kind} texture: ${error.message}`, file); }
             }
         });

@@ -40,9 +40,15 @@ module.exports = function register(nativeRequire) {
                 condition: () => !ready || (controller.manager.state.ready &&
                     (!['mcpskins_save', 'mcpskins_discard'].includes(id) || controller.manager.state.active))
             }));
+            actions.push(new Action('mcpskins_duplicate_texture_frame', {
+                name: 'Duplicate Current Frame', description: 'Append a copy of the current texture frame and select it for painting.',
+                icon: 'content_copy', category: 'textures', keybind: new Keybind({key: -1}),
+                condition: () => controller.nativeAnimations.canDuplicateCurrentFrame(),
+                click: () => controller.duplicateCurrentFrame()
+            }));
             MenuBar.addAction(actions[0], 'tools');
             MenuBar.addAction(actions[0], 'file');
-            toolbar = new Toolbar('mcpskins_asset_toolbar', {children: ['mcpskins_pack', 'mcpskins_new', 'mcpskins_refresh', 'mcpskins_save', 'mcpskins_discard']});
+            toolbar = new Toolbar('mcpskins_asset_toolbar', {children: ['mcpskins_pack', 'mcpskins_new', 'mcpskins_refresh', 'mcpskins_save', 'mcpskins_discard', 'mcpskins_duplicate_texture_frame']});
             css = Blockbench.addCSS(styles);
             panel = new Panel('mcpskins_asset_manager', {
                 name: PLUGIN_TITLE, icon: 'inventory_2',
@@ -85,6 +91,10 @@ module.exports = function register(nativeRequire) {
 'use strict';
 const {Manager} = require("src/state/manager.js");
 const {VERSION} = require("src/version.js");
+const {AnimationSession} = require("src/assets/animation.js");
+const {canvasRaster} = require("src/integration/raster.js");
+const {animationComponent} = require("src/ui/animation.js");
+const {NativeAnimations,saveNativeMetadata} = require("src/integration/native-animation.js");
 const {UpdateChecker} = require("src/integration/updates.js");
 const {PackPaths, packDirectorySelection} = require("src/domain/paths.js");
 const {clone, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames, isObject} = require("src/domain/skin.js");
@@ -95,6 +105,7 @@ const {RarityEditor} = require("src/state/rarities.js");
 const {rarityComponent} = require("src/ui/rarities.js");
 const {loadPackSettings, savePackSettings} = require("src/storage/settings.js");
 const {loadPackMetadata, savePackMetadata} = require("src/storage/pack-metadata.js");
+const {newPackPaths, createPack} = require("src/storage/new-pack.js");
 const {RECENT_PACKS, recentPacks, rememberPack} = require("src/storage/recent-packs.js");
 const {atomicJSON, isDirectory} = require("src/storage/files.js");
 const {STATUSES, saveStatuses} = require("src/domain/status.js");
@@ -108,7 +119,7 @@ const {prepareSkin, assetSelection} = require("src/assets/preparation.js");
 const {previewCards} = require("src/assets/previews.js");
 const {Desktop} = require("src/integration/desktop.js");
 const {BlockbenchBridge} = require("src/integration/blockbench.js");
-const {message, confirmUnsaved, packDialog, colorDialog, namePrefixDialog} = require("src/ui/dialogs.js");
+const {message, confirmUnsaved, packDialog, newPackDialog, colorDialog, namePrefixDialog} = require("src/ui/dialogs.js");
 
 const GUNPACKS = 'mcpskins_asset_manager.gunpacks.v1';
 const PREFERENCES = 'mcpskins_asset_manager.preferences.v1';
@@ -119,6 +130,7 @@ class Controller {
     constructor(nativeRequire, storage = localStorage, options = {}) {
         this.manager = new Manager();
         this.updates = new UpdateChecker(VERSION, options);
+        this.nativeAnimations = new NativeAnimations(); this.animations = new Map(); this.raster = options.raster || null;
         this.desktop = new Desktop(nativeRequire);
         this.bridge = new BlockbenchBridge(this.desktop.path);
         this.storage = storage;
@@ -152,7 +164,7 @@ class Controller {
     start() {
         this.checkForUpdates();
         if (!this.healthPoll) {
-            this.healthPoll = setInterval(() => this.updateHealth(), 3000);
+            this.healthPoll = setInterval(() => { this.updateHealth(); this.animations.forEach(session => session.poll()); this.nativeAnimations.poll(); }, 3000);
             if (this.healthPoll && typeof this.healthPoll.unref === 'function') this.healthPoll.unref();
         }
         this.manager.state.weaponNames = sanitizeWeaponNames(this.getStored(WEAPON_NAMES));
@@ -425,10 +437,11 @@ class Controller {
                 const {root, folder, directory} = packDirectorySelection(this.desktop.path, values.pack_directory);
                 const namespace = String(values.pack_namespace || '').trim().toLowerCase();
                 if (!validComponent(namespace)) throw new Error('Pack Namespace must be a single folder component.');
-                const paths = new PackPaths(this.desktop.path, root, folder, namespace);
-                connection = connection && connection.packDirectory === directory ? connection : this.readPackDirectory(directory);
+                const paths = values.create_pack ? newPackPaths(this.desktop.path, root, folder, namespace) : new PackPaths(this.desktop.path, root, folder, namespace);
+                connection = values.create_pack ? this.desktop.connect(root) : connection && connection.packDirectory === directory ? connection : this.readPackDirectory(directory);
                 const switching = !s.ready || paths.root !== s.root || folder !== s.folder || namespace !== s.namespace;
                 const apply = () => {
+                    if (values.create_pack) createPack(connection.fs, paths, values);
                     const repository = new RegistryRepository(connection.fs, paths);
                     const result = switching ? repository.discover() : null;
                     savePackSettings(connection.fs, this.desktop.path, paths.root, folder, namespace);
@@ -450,7 +463,15 @@ class Controller {
                 if (switching) return this.transition(apply);
                 apply();
                 return true;
-            }, recentPacks(this.desktop.path, this.getStored(RECENT_PACKS)), (directory, author, connection) => this.savePackAuthor(directory, author, connection));
+            }, recentPacks(this.desktop.path, this.getStored(RECENT_PACKS)), (directory, author, connection) => this.savePackAuthor(directory, author, connection), submit => {
+                this.removeDialog('mcpskins_new_pack');
+                const createDialog = newPackDialog(s.root, values => {
+                    const paths = newPackPaths(this.desktop.path, values.parent_directory, values.pack_folder, values.pack_namespace);
+                    return submit({...values, pack_directory: paths.pack, pack_namespace: paths.namespace, create_pack: true}, null);
+                }, () => { if (!this.disposed) dialog.show(); });
+                this.dialogs.add(createDialog);
+                return createDialog;
+            });
         this.dialogs.add(dialog);
     }
     edit(key, value) {
@@ -565,7 +586,7 @@ class Controller {
                 this.manager.state.draft, this.desktop.pathToFileURL);
         } catch (error) { this.manager.state.notice = `Preview unavailable: ${error.message}`; }
     }
-    openModel() {
+    openModel(frameTexture = null) {
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) return;
         return this.run(async () => {
             const repository = this.manager.repository, draft = this.manager.state.draft;
@@ -622,8 +643,118 @@ class Controller {
                 }
             }
             if (!files) throw new Error('Could not resolve gun-pack assets.');
+            for(const texture of [files.texture,files.normal,files.specular].filter(Boolean)) {
+                const manifest=this.desktop.path.join(this.desktop.path.dirname(texture),this.desktop.path.basename(texture,'.png')+'_frames','animation.json');
+                if(repository.fs.existsSync(manifest)) {
+                    const session=this.animationSession(repository,texture); await session.poll();
+                    if(session.state.error) this.manager.state.notice=session.state.error;
+                }
+            }
+            if (frameTexture) {
+                if (!repository.fs.existsSync(frameTexture)) throw new Error('Frame PNG is missing.');
+                files = {...files, texture: frameTexture, normal: null, specular: null, animationFrame: true};
+            }
             this.bridge.openModel(files, repository.fs);
             this.updatePreviews();
+            return files;
+        });
+    }
+    animationSession(repository,texture) {
+        let session=this.animations.get(texture);
+        if(!session || session.disposed) {
+            if(!this.raster) this.raster=canvasRaster();
+            session=new AnimationSession(repository.fs,repository.paths,texture,this.raster,{
+                url:file=>this.desktop.pathToFileURL(file).href,
+                canWrite:files=>{
+                    if(typeof ModelProject!=='undefined') for(const project of ModelProject.all) for(const texture of project.textures || [])
+                        if(texture.saved===false && files.some(file=>this.bridge.same(texture.path,file))) throw new Error('Save the open texture edits in Blockbench before rebuilding.');
+                },
+                saved:()=>{ if(!this.disposed && this.manager.repository && this.manager.repository.paths.pack===repository.paths.pack) this.updatePreviews(); },
+                error:message=>{if(!this.disposed && this.manager.repository && this.manager.repository.paths.pack===repository.paths.pack) this.manager.state.notice='Animation: '+message;}
+            });
+            this.animations.set(texture,session);
+        }
+        return session;
+    }
+    duplicateCurrentFrame() {
+        return this.run(async ()=>{
+            const texture=this.nativeAnimations.get('Texture')?.selected;
+            let session=texture?.path ? this.animations.get(texture.path) : null;
+            if(!session && texture?.path && this.manager.selected && this.manager.selection.length===1) {
+                const repository=this.manager.repository,selection=assetSelection(repository.paths,this.manager.state.draft);
+                const paths=['','_n','_s','_icon','_hud','_hud_empty','_lod'].map(suffix=>repository.paths.path.join(selection.folder,selection.id+suffix+'.png'));
+                if(paths.some(file=>this.bridge.same(file,texture.path))) session=this.animationSession(repository,texture.path);
+            }
+            if(session) await session.preferNative();
+            if(this.nativeAnimations.get('Texture')?.selected!==texture) throw new Error('The selected texture changed. Try duplicating the current frame again.');
+            return this.nativeAnimations.duplicateCurrentFrame(session);
+        });
+    }
+    openAnimatedTextures() {
+        if (!this.manager.selected || this.manager.selection.length > 1 || this.manager.duplicateSource) return;
+        return this.run(async () => {
+            const repository=this.manager.repository, selected=this.manager.selected;
+            const selection=assetSelection(repository.paths,this.manager.state.draft);
+            if(selection.id!==selected.skin.id) throw new Error('Save the skin ID change before editing animation frames.');
+            if(!this.raster) this.raster=canvasRaster();
+            this.removeDialog('mcpskins_animation');
+            const targets=[{id:'skin',label:'Skin',suffix:''},{id:'normal',label:'Normal map',suffix:'_n'},{id:'specular',label:'Specular map',suffix:'_s'},
+                {id:'icon',label:'Icon',suffix:'_icon'},...(this.manager.state.draft.kind==='gun'?[{id:'hud',label:'HUD',suffix:'_hud'},{id:'hud_empty',label:'Empty HUD',suffix:'_hud_empty'},{id:'lod',label:'LOD',suffix:'_lod'}]:[])];
+            const getSession=target=>{
+                const value=this.animationSession(repository,this.desktop.path.join(selection.folder,selection.id+target.suffix+'.png'));
+                if(!value.running && !value.state.dirty) value.load();
+                return value;
+            };
+            let session=getSession(targets[0]);
+            await session.preferNative();
+            const state={target:'skin',targets,session:session.state,error:''};
+            const execute=async callback=>{ try { state.error=''; return await callback(); } catch(error) { state.error=error.message; return false; } };
+            const settle=async action=>{
+                if(session.running) await session.running;
+                if(session.state.dirty) {
+                    const choice=await confirmUnsaved({title:'Unsaved animation settings',message:'Save and build the animation before continuing?'});
+                    if(choice==='cancel') return false;
+                    if(choice==='save') { try { saveNativeMetadata(session,session.state);this.nativeAnimations.applySessionSettings(session); } catch(error) {session.state.error=error.message;return false;} }
+                    if(choice==='discard') session.load();
+                }
+                return action();
+            };
+            const importImages=strip=>{
+                const targetSession=session;
+                Blockbench.import({extensions:['png'],type:'PNG images',readtype:'buffer',multiple:!strip},files=>{
+                    if(!files || !files.length || this.disposed) return;
+                    execute(async ()=>{
+                        if(targetSession.options.canWrite) targetSession.options.canWrite([targetSession.texture]);
+                        await targetSession.preferNative();
+                        const frames=files.slice().sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})).map(file=>new Uint8Array(file.content));
+                        return strip ? targetSession.importStrip(frames[0]) : targetSession.importFrames(frames,true);
+                    });
+                });
+            };
+            const close=()=>{ execute(()=>settle(()=>dialog.hide())); return false; };
+            const dialog=new Dialog('mcpskins_animation',{title:'Animated Textures',width:950,buttons:['Close'],confirmIndex:0,cancelIndex:0,onConfirm:close,onCancel:close,
+                component:animationComponent(state,{
+                    target:id=>execute(()=>settle(async ()=>{ const target=targets.find(target=>target.id===id); if(!target) return; session=getSession(target); await session.preferNative(); state.target=id; state.session=session.state; })),
+                    edit:(key,value)=>session.edit(key,value),timing:(index,value)=>session.editTiming(index,value),
+                    importFrames:()=>importImages(false),importStrip:()=>importImages(true),
+                    save:()=>execute(()=>{
+                        saveNativeMetadata(session,session.state);
+                        this.nativeAnimations.applySessionSettings(session);
+                        return true;
+                    }),
+                    folder:()=>execute(()=>{ repository.fs.mkdirSync(selection.folder,{recursive:true}); return this.desktop.open(selection.folder,true); }),
+                    native:()=>execute(()=>settle(async ()=>{
+                        if(this.manager.repository!==repository || this.manager.selected!==selected) throw new Error('Select the original skin before opening its native editor.');
+                        await session.preferNative();dialog.hide();
+                        try {
+                            const files=await this.openModel(session.texture);if(!files || this.disposed) {if(!this.disposed) dialog.show();return false;}
+                            if(!session.state.dirty) session.load();
+                            await session.preferNative();
+                            return await this.nativeAnimations.open(session,(a,b)=>this.bridge.same(a,b));
+                        } catch(error) {if(!this.disposed) dialog.show();throw error;}
+                    }))
+                })});
+            this.dialogs.add(dialog); dialog.show(); return dialog;
         });
     }
     openFolder() {
@@ -751,6 +882,8 @@ class Controller {
         if (this.manager.state.dirty) this.remember();
         this.disposed = true;
         this.updates.dispose();
+        this.nativeAnimations.dispose();
+        this.animations.forEach(session => session.dispose()); this.animations.clear();
         this.cancelPrefixRequest();
         this.sourceRequests.forEach(finish => finish(null)); this.sourceRequests.clear();
         if (this.catalog) this.catalog.dispose();
@@ -1425,9 +1558,603 @@ module.exports = {readJSON, atomicJSON, isFile, isDirectory};
 },
 "src/version.js": function(module, exports, require) {
 'use strict';
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const PLUGIN_TITLE = 'MCPSkins Manager v' + VERSION;
 module.exports = {VERSION, PLUGIN_TITLE};
+
+},
+"src/assets/animation.js": function(module, exports, require) {
+'use strict';
+const {readJSON, isFile, isDirectory} = require("src/storage/files.js");
+const {isObject, clone} = require("src/domain/skin.js");
+
+const MAX_FRAMES = 256, MAX_PIXELS = 16777216, MAX_SIDE = 16384;
+function positive(value, label) {
+    if (!/^[0-9]+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) throw new Error(label + ' must be a positive whole number.');
+    return Number(value);
+}
+function pngSize(bytes) {
+    const signature = [137,80,78,71,13,10,26,10];
+    if (bytes.length < 24 || signature.some((v,i) => bytes[i] !== v) || String.fromCharCode(...bytes.slice(12,16)) !== 'IHDR') throw new Error('Expected a PNG image.');
+    const integer = offset => bytes[offset] * 16777216 + bytes[offset+1] * 65536 + bytes[offset+2] * 256 + bytes[offset+3];
+    const width = integer(16), height = integer(20);
+    if (!width || !height || width > MAX_SIDE || height > MAX_SIDE || width * height > MAX_PIXELS) throw new Error('Image dimensions exceed the animation editor limit.');
+    return {width, height};
+}
+function validateFrames(frames, width, height) {
+    width = positive(width, 'Frame width'); height = positive(height, 'Frame height');
+    if (!frames.length || frames.length > MAX_FRAMES || height * frames.length > MAX_SIDE || width > MAX_SIDE || width * height * frames.length > MAX_PIXELS) throw new Error('Use 1–256 frames, at most 16 million pixels and 16384 pixels per side in the stitched image.');
+    for (const frame of frames) {
+        const size = pngSize(frame);
+        if (size.width !== width || size.height !== height) throw new Error('All frames must have the same dimensions (' + width + ' × ' + height + ').');
+    }
+    return {width, height};
+}
+function animationMetadata(settings, root = {}) {
+    const frametime = positive(settings.frametime, 'Frame time');
+    if(typeof settings.interpolate!=='boolean') throw new Error('Interpolation must be true or false.');
+    const width = positive(settings.width, 'Frame width'), height = positive(settings.height, 'Frame height');
+    const animation = {...(isObject(root.animation) ? clone(root.animation) : {}), frametime, interpolate: !!settings.interpolate, width, height,
+        frames: settings.frames.map((_frame,index) => settings.frames[index].time === '' || settings.frames[index].time == null ? index : {index, time: positive(settings.frames[index].time, 'Frame duration')})};
+    return {...clone(root), animation};
+}
+function stripLayout(bytes, metadata = {}, width = null, height = null) {
+    const size = pngSize(bytes), animation = isObject(metadata.animation) ? metadata.animation : {};
+    width = positive(width ?? animation.width ?? Math.min(size.width,size.height), 'Frame width');
+    height = positive(height ?? animation.height ?? Math.min(size.width,size.height), 'Frame height');
+    if (size.width % width || size.height % height) throw new Error('Frame dimensions must divide the strip dimensions exactly.');
+    const count = size.width / width * (size.height / height);
+    if(count>MAX_FRAMES) throw new Error('The strip must contain 1?256 frames.');
+    const order = animation.frames === undefined ? Array.from({length: count},(_,index) => index) : animation.frames;
+    if (!Array.isArray(order) || !order.length || order.length > MAX_FRAMES || count > MAX_FRAMES) throw new Error('The strip must contain 1–256 frames.');
+    positive(animation.frametime ?? 1, 'Frame time');
+    if (animation.interpolate !== undefined && typeof animation.interpolate !== 'boolean') throw new Error('Interpolation must be true or false.');
+    const frames = order.map(frame => {
+        const index = isObject(frame) ? frame.index : frame;
+        if (!Number.isSafeInteger(index) || index < 0 || index >= count) throw new Error('Animation frame index is outside the strip.');
+        return {index, time: isObject(frame) && frame.time !== undefined ? positive(frame.time, 'Frame duration') : ''};
+    });
+    if (height * frames.length > MAX_SIDE || width * height * frames.length > MAX_PIXELS) throw new Error('Stitched animation exceeds the image size limit.');
+    return {width, height, columns: size.width / width, frames, frametime: animation.frametime ?? 1, interpolate: animation.interpolate ?? false};
+}
+function timingRows(bytes,metadata,width,height) {
+    const layout=stripLayout(bytes,metadata,width,height),raw=metadata.animation && metadata.animation.frames;
+    return layout.frames.map((frame,index)=>({index:frame.index,time:frame.time===''?'':String(frame.time),extra:Array.isArray(raw)&&isObject(raw[index])?clone(raw[index]):{}}));
+}
+function timingOrder(rows,count) {
+    if(!Array.isArray(rows) || !rows.length) throw new Error('At least one playback frame is required.');
+    const result=rows.map(row=>{
+        if(!Number.isSafeInteger(row.index) || row.index<0 || row.index>=count) throw new Error('A timing row refers to a frame outside the texture strip.');
+        const entry={...(isObject(row.extra)?clone(row.extra):{}),index:row.index};delete entry.time;
+        if(row.time!=='' && row.time!=null) entry.time=positive(row.time,'Frame '+row.index+' time');
+        return Object.keys(entry).length===1?row.index:entry;
+    });
+    return result.length===count && result.every((entry,index)=>entry===index)?null:result;
+}
+function stamp(fs, file) {
+    if (!isFile(fs,file)) return '';
+    const s=fs.statSync(file); return s.size + ':' + s.mtimeMs + ':' + s.ctimeMs;
+}
+function writeBundle(fs, files) {
+    const staged=[], replaced=[];
+    try {
+        for (const [file,bytes] of files) {
+            const before=isFile(fs,file) ? fs.readFileSync(file) : null;
+            fs.writeFileSync(file+'.animation.tmp',bytes,{flag:'wx'});
+            staged.push({file,before});
+        }
+        for (const entry of staged) { fs.renameSync(entry.file+'.animation.tmp',entry.file); replaced.push(entry); }
+    } catch (error) {
+        const failures=[];
+        for (const entry of replaced.reverse()) {
+            try { if (entry.before === null) fs.unlinkSync(entry.file); else fs.writeFileSync(entry.file,entry.before); }
+            catch { failures.push(entry.file); }
+        }
+        if (failures.length) throw new Error(error.message + ' Could not restore: ' + failures.join(', '));
+        throw error;
+    } finally {
+        for (const entry of staged) if (fs.existsSync(entry.file+'.animation.tmp')) fs.unlinkSync(entry.file+'.animation.tmp');
+    }
+}
+
+class AnimationSession {
+    constructor(fs, paths, texture, raster, options = {}) {
+        this.fs=fs; this.paths=paths; this.texture=texture; this.raster=raster; this.options=options;
+        this.base=paths.path.basename(texture,'.png'); this.folder=paths.path.join(paths.path.dirname(texture),this.base+'_frames');
+        this.manifest=paths.path.join(this.folder,'animation.json'); this.metadata=texture+'.mcmeta';
+        this.disposed=false; this.running=null; this.revision=0; this.document={}; this.rootMetadata={};
+        this.state={mode:'frames',timings:[],timingsDirty:false,frames:[],width:256,height:256,frametime:'2',interpolate:false,selected:0,dirty:false,busy:false,error:'',status:'',playing:false,elapsed:0};
+        this.load();
+    }
+    file(frame) {
+        if (!frame || typeof frame.file !== 'string' || !frame.file.startsWith(this.base+'_') || !/^[0-9]+\.png$/.test(frame.file.slice(this.base.length+1))) throw new Error('Invalid animation frame filename.');
+        return this.paths.path.join(this.folder,frame.file);
+    }
+    sourceStamp() { return this.state.frames.map(frame => this.file(frame)+':'+stamp(this.fs,this.file(frame))).join('|'); }
+    load() {
+        if (this.running) throw new Error('Wait for stitching to finish.');
+        this.rootMetadata=isFile(this.fs,this.metadata) ? readJSON(this.fs,this.metadata) : {};
+        if (!isObject(this.rootMetadata)) throw new Error('Animation metadata must be a JSON object.');
+        this.document={}; this.state.frames=[];
+        if (isFile(this.fs,this.manifest)) {
+            const value=readJSON(this.fs,this.manifest);
+            if (!isObject(value) || value.version !== 1 || !Array.isArray(value.frames) || value.frames.length > MAX_FRAMES) throw new Error('Invalid numbered-frame workspace.');
+            value.frames.forEach(frame => this.file(frame));
+            animationMetadata(value,this.rootMetadata);
+            this.document=value;
+            Object.assign(this.state,{mode:value.mode==='native'?'native':'frames',frames:clone(value.frames),width:value.width,height:value.height,frametime:String(value.frametime),interpolate:!!value.interpolate});
+            if(value.mode==='native' && isFile(this.fs,this.texture) && this.rootMetadata.animation) {
+                const layout=stripLayout(this.fs.readFileSync(this.texture),this.rootMetadata);
+                Object.assign(this.state,{width:layout.width,height:layout.height,frametime:String(layout.frametime),interpolate:layout.interpolate});
+            }
+        } else if (isFile(this.fs,this.texture)) {
+            const size=pngSize(this.fs.readFileSync(this.texture)), animation=this.rootMetadata.animation;
+            const layout=animation ? stripLayout(this.fs.readFileSync(this.texture),this.rootMetadata) : {...size,frametime:2,interpolate:false};
+            Object.assign(this.state,{width:layout.width,height:layout.height,frametime:String(layout.frametime),interpolate:layout.interpolate});
+        }
+        this.outputStamp=stamp(this.fs,this.texture); this.metaStamp=stamp(this.fs,this.metadata); this.manifestStamp=stamp(this.fs,this.manifest);
+        this.lastSources=this.state.frames.map(frame=>this.file(frame)+':'+(typeof frame.signature==='string'?frame.signature:stamp(this.fs,this.file(frame)))).join('|'); this.state.dirty=false; this.state.error=''; this.state.elapsed=0;
+        this.refreshTimings();this.refreshFrames();
+    }
+    refreshTimings() {
+        this.state.timings=isFile(this.fs,this.texture)?timingRows(this.fs.readFileSync(this.texture),this.rootMetadata,Number(this.state.width),Number(this.state.height)):[];
+        this.state.timingsDirty=false;
+    }
+    editTiming(index,value) {
+        this.state.timings=this.state.timings.map((row,i)=>i===index?{...row,time:value}:row);
+        this.state.timingsDirty=true;this.state.dirty=true;this.state.error='';this.revision++;
+    }
+    refreshFrames() {
+        this.state.frames=this.state.frames.map(frame => ({...frame,src:this.options.url ? this.options.url(this.file(frame))+'?v='+stamp(this.fs,this.file(frame)) : ''}));
+        this.state.selected=Math.max(0,Math.min(this.state.selected,this.state.frames.length-1));
+    }
+    edit(key,value) { this.state[key]=value; this.state.dirty=true; this.state.error=''; this.revision++; }
+    editTime(index,value) { this.edit('frames',this.state.frames.map((frame,i)=>i===index?{...frame,time:value}:frame)); }
+    move(index,direction) {
+        const frames=this.state.frames.slice(), next=index+direction;
+        if(next<0 || next>=frames.length) return;
+        [frames[index],frames[next]]=[frames[next],frames[index]]; this.edit('frames',frames); this.state.selected=next;
+    }
+    remove(index) { if(this.state.frames.length<=1) return; this.edit('frames',this.state.frames.filter((_frame,i)=>i!==index)); this.refreshFrames(); }
+    async importFrames(frames, replace=false, layout=null) {
+        if(this.running || this.state.busy) throw new Error('Wait for stitching to finish.');
+        if(this.disposed) return false;
+        const first=pngSize(frames[0]), all=replace ? frames : [...this.state.frames.map(frame=>this.fs.readFileSync(this.file(frame))),...frames];
+        validateFrames(all,replace || !this.state.frames.length ? first.width : this.state.width,replace || !this.state.frames.length ? first.height : this.state.height);
+        const created=[];
+        this.fs.mkdirSync(this.folder,{recursive:true});
+        let number=1;
+        const names=new Set(this.fs.readdirSync(this.folder));
+        try {
+            for(let index=0; index<frames.length; index++) {
+                while(names.has(this.base+'_'+number+'.png')) number++;
+                const frame={file:this.base+'_'+number+'.png',time:layout ? layout.frames[index].time : ''};
+                this.fs.writeFileSync(this.file(frame),frames[index],{flag:'wx'}); names.add(frame.file); created.push(frame);
+            }
+        } catch(error) { created.forEach(frame=>this.fs.unlinkSync(this.file(frame))); throw error; }
+        if(layout) Object.assign(this.state,{frametime:String(layout.frametime),interpolate:layout.interpolate});
+        Object.assign(this.state,{selected:replace?0:this.state.frames.length,width:first.width,height:first.height,frames:replace?created:[...this.state.frames,...created],dirty:true,elapsed:0});
+        this.revision++; this.refreshFrames();
+        return this.build(true);
+    }
+    async useCurrent() {
+        const bytes=this.fs.readFileSync(this.texture), metadata=isFile(this.fs,this.metadata)?readJSON(this.fs,this.metadata):{};
+        if(metadata.animation) return this.importStrip(bytes,null,null,metadata);
+        return this.importFrames([bytes],true);
+    }
+    async importStrip(bytes,width=this.state.width,height=this.state.height,metadata={}) {
+        const layout=stripLayout(bytes,metadata,width,height);
+        const frames=await this.raster.split(bytes,layout);
+        if(this.disposed) return false;
+        this.rootMetadata={...this.rootMetadata,...metadata};
+        return this.importFrames(frames,true,layout);
+    }
+    async duplicate() {
+        const frame=this.state.frames[this.state.selected];
+        if(!frame) return this.useCurrent();
+        return this.importFrames([this.fs.readFileSync(this.file(frame))]);
+    }
+    async build(force=false) {
+        if(this.disposed) return false;
+        if(this.running) return this.running;
+        this.running=this.rebuild(force);
+        try { return await this.running; } finally { this.running=null; }
+    }
+    async rebuild(force) {
+        this.state.busy=true; this.state.error=''; this.state.status='Stitching...';
+        try {
+            const revision=this.revision, sources=this.sourceStamp(), initialOutput=stamp(this.fs,this.texture), initialMeta=stamp(this.fs,this.metadata);
+            if(stamp(this.fs,this.manifest)!==this.manifestStamp) throw new Error('The frame workspace changed externally. Reopen Animated Textures before rebuilding.');
+            if(!force && (stamp(this.fs,this.texture)!==this.outputStamp || stamp(this.fs,this.metadata)!==this.metaStamp)) throw new Error('The stitched texture or metadata changed externally. Click Save & Build to replace it from the numbered frames.');
+            if(this.options.canWrite) this.options.canWrite([this.texture,this.metadata,...this.state.frames.map(frame=>this.file(frame))]);
+            const frames=this.state.frames.map(frame=>this.fs.readFileSync(this.file(frame)));
+            const size=validateFrames(frames,this.state.width,this.state.height), metadata=animationMetadata(this.state,this.rootMetadata);
+            const output=await this.raster.stitch(frames,size);
+            if(this.disposed) return false;
+            if(initialOutput!==stamp(this.fs,this.texture) || initialMeta!==stamp(this.fs,this.metadata) || this.manifestStamp!==stamp(this.fs,this.manifest)) throw new Error('Generated files changed during stitching. Save & Build again.');
+            if(revision!==this.revision || sources!==this.sourceStamp()) throw new Error('Frames changed during stitching. Save & Build again.');
+            if(this.options.canWrite) this.options.canWrite([this.texture,this.metadata,...this.state.frames.map(frame=>this.file(frame))]);
+            if(output.length>16*1024*1024) throw new Error('The stitched PNG exceeds the 16 MB texture limit.');
+            const saved={...this.document,mode:this.state.mode,version:1,width:size.width,height:size.height,frametime:Number(this.state.frametime),interpolate:!!this.state.interpolate,
+                frames:this.state.frames.map(frame=>({file:frame.file,time:frame.time==='' || frame.time==null ? '' : Number(frame.time),signature:stamp(this.fs,this.file(frame))}))};
+            this.fs.mkdirSync(this.folder,{recursive:true});
+            writeBundle(this.fs,[[this.texture,output],[this.metadata,JSON.stringify(metadata,null,2)+'\n'],[this.manifest,JSON.stringify(saved,null,2)+'\n']]);
+            this.document=saved; this.rootMetadata=metadata;
+            this.outputStamp=stamp(this.fs,this.texture); this.metaStamp=stamp(this.fs,this.metadata); this.manifestStamp=stamp(this.fs,this.manifest); this.lastSources=sources;
+            this.state.dirty=false; this.state.status=this.state.mode==='native'?'Frames imported into the texture strip. Continue in the native Flipbook Editor.':'Stitched PNG and metadata saved. Saved frame edits rebuild automatically.';
+            this.refreshTimings();this.refreshFrames(); if(this.options.saved) this.options.saved(); return true;
+        } catch(error) { this.state.error=error.message; this.state.status=''; return false; }
+        finally { this.state.busy=false; }
+    }
+    async preferNative() {
+        if(this.running) await this.running;
+        this.state.mode='native'; this.document.mode='native';
+        if(isFile(this.fs,this.manifest)) {
+            const value=readJSON(this.fs,this.manifest);value.mode='native';
+            writeBundle(this.fs,[[this.manifest,JSON.stringify(value,null,2)+'\n']]);
+            this.document=value;this.manifestStamp=stamp(this.fs,this.manifest);
+        }
+    }
+    saveNativeState(info) {
+        Object.assign(this.state,{width:info.width,height:info.height,frametime:String(info.frametime),interpolate:!!info.interpolate,mode:'native'});
+        if(isFile(this.fs,this.manifest)) {
+            const value=readJSON(this.fs,this.manifest);
+            Object.assign(value,{mode:'native',width:info.width,height:info.height,frametime:Number(info.frametime),interpolate:!!info.interpolate});
+            writeBundle(this.fs,[[this.manifest,JSON.stringify(value,null,2)+'\n']]);
+            this.document=value;this.manifestStamp=stamp(this.fs,this.manifest);
+        }
+        this.refreshTimings();
+    }
+    async poll() {
+        if(this.disposed || this.state.mode==='native' || this.running || this.state.dirty || !this.state.frames.length) return;
+        try { if(!isFile(this.fs,this.texture) || !isFile(this.fs,this.metadata)) { await this.build(true); return; } if(this.sourceStamp()!==this.lastSources) { this.refreshFrames(); await this.build(); } }
+        catch(error) { this.state.error=error.message; }
+    }
+    dispose() { this.disposed=true; }
+}
+function animationCopies(fs,paths,source,target) {
+    const copies=[];
+    for(const suffix of ['', '_n', '_s', '_icon', '_hud', '_hud_empty', '_lod']) {
+        const fromBase=source.id+suffix,toBase=target.id+suffix;
+        const from=paths.path.join(source.folder,fromBase+'_frames'),to=paths.path.join(target.folder,toBase+'_frames');
+        const manifest=paths.path.join(from,'animation.json');
+        if(!isFile(fs,manifest)) continue;
+        if(fs.existsSync(to)) throw new Error('Duplicate frame workspace already exists: '+to);
+        const data=readJSON(fs,manifest);
+        if(!isObject(data) || data.version!==1 || !Array.isArray(data.frames)) throw new Error('Invalid animation workspace: '+manifest);
+        const frames=data.frames.map(frame=>{
+            if(!frame || typeof frame.file!=='string' || !frame.file.startsWith(fromBase+'_') || !/^[0-9]+\.png$/.test(frame.file.slice(fromBase.length+1))) throw new Error('Invalid animation frame path.');
+            const filename=toBase+frame.file.slice(fromBase.length);
+            copies.push([paths.path.join(to,filename),fs.readFileSync(paths.path.join(from,frame.file))]);
+            return {...frame,file:filename};
+        });
+        copies.push([paths.path.join(to,'animation.json'),JSON.stringify({...data,frames},null,2)+'\n']);
+    }
+    return copies;
+}
+module.exports={timingRows,timingOrder,positive,animationCopies,AnimationSession,pngSize,stripLayout,animationMetadata,validateFrames,writeBundle};
+
+},
+"src/integration/raster.js": function(module, exports, require) {
+'use strict';
+const {pngSize}=require("src/assets/animation.js");
+function canvasRaster(environment={}) {
+    const doc=environment.document || document, ImageClass=environment.Image || Image;
+    const load=bytes=>new Promise((resolve,reject)=>{
+        pngSize(bytes);
+        const url=URL.createObjectURL(new Blob([bytes],{type:'image/png'})), image=new ImageClass();
+        image.onload=()=>{ URL.revokeObjectURL(url); resolve(image); };
+        image.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error('Could not decode a PNG frame.')); }; image.src=url;
+    });
+    const canvas=(width,height)=>{ const value=doc.createElement('canvas'); value.width=width; value.height=height; if(!value.getContext('2d')) throw new Error('Canvas image processing is unavailable.'); return value; };
+    const encode=value=>{ const raw=atob(value.toDataURL('image/png').split(',')[1]); return Uint8Array.from(raw,char=>char.charCodeAt(0)); };
+    return {
+        async stitch(frames,size) {
+            const output=canvas(size.width,size.height*frames.length), context=output.getContext('2d'); context.imageSmoothingEnabled=false;
+            for(let i=0;i<frames.length;i++) context.drawImage(await load(frames[i]),0,i*size.height);
+            return encode(output);
+        },
+        async split(bytes,layout) {
+            const image=await load(bytes), output=canvas(layout.width,layout.height), context=output.getContext('2d'); context.imageSmoothingEnabled=false;
+            return layout.frames.map(frame=>{
+                context.clearRect(0,0,layout.width,layout.height);
+                context.drawImage(image,(frame.index%layout.columns)*layout.width,Math.floor(frame.index/layout.columns)*layout.height,layout.width,layout.height,0,0,layout.width,layout.height);
+                return encode(output);
+            });
+        }
+    };
+}
+module.exports={canvasRaster};
+
+},
+"src/ui/animation.js": function(module, exports, require) {
+'use strict';
+function animationComponent(state,actions) {
+    return {
+        data() {return {a:state};},
+        computed:{s(){return this.a.session;}},
+        methods:{
+            async target(event){await actions.target(event.target.value);event.target.value=this.a.target;},
+            edit(key,event){actions.edit(key,event.target.type==='checkbox'?event.target.checked:event.target.value);},
+            timing(index,event){actions.timing(index,event.target.value);},
+            native(){return actions.native();},importFrames(){actions.importFrames();},importStrip(){actions.importStrip();},
+            save(){return actions.save();},folder(){return actions.folder();}
+        },
+        template:`<section class="mcpskins-animation">
+            <label>Texture<select :value="a.target" @change="target" :disabled="s.busy"><option v-for="target in a.targets" :key="target.id" :value="target.id">{{target.label}}</option></select></label>
+            <p>Use Blockbench's Flipbook Editor to add, paint, reorder, resize, and preview frames.</p>
+            <div class="mcpskins-animation-toolbar"><button type="button" :disabled="s.busy" @click="native">Open Flipbook Editor</button><button type="button" @click="folder">Open Texture Folder</button></div>
+            <p class="mcpskins-rarity-muted">Apply changes in the native editor, then save the texture in Blockbench. MCPSkins animation metadata updates automatically. Native edits will not be overwritten by the imported numbered frames.</p>
+            <h3>Import animation</h3>
+            <p class="mcpskins-rarity-muted">Import PNG frames to replace the texture with a vertical strip. Files are sorted by number, so _2.png comes before _10.png. A copy of each source frame is kept in the working folder.</p>
+            <div class="mcpskins-animation-toolbar"><button type="button" :disabled="s.busy" @click="importFrames">Import Multiple Frames</button><button type="button" :disabled="s.busy" @click="importStrip">Import Texture Strip</button></div>
+            <div class="mcpskins-animation-dimensions"><label>Frame width<input type="number" min="1" :value="s.width" @input="edit('width',$event)"></label><label>Frame height<input type="number" min="1" :value="s.height" @input="edit('height',$event)"></label></div>
+            <p class="mcpskins-rarity-muted">Set frame dimensions before importing an existing strip. Separate frame PNGs must all have the same dimensions.</p>
+            <h3>MCPSkins playback</h3>
+            <label>Frame time (ticks)<input type="number" min="1" step="1" :value="s.frametime" @input="edit('frametime',$event)"></label>
+            <label class="mcpskins-animation-check"><input type="checkbox" :checked="s.interpolate" @change="edit('interpolate',$event)">Interpolate between frames</label>
+            <details class="mcpskins-frame-timings" open><summary>Per-frame timing</summary>
+                <p class="mcpskins-rarity-muted">Frame numbers start at 0, matching Blockbench and .mcmeta. Leave a time blank to use the default frame time. Existing playback order and repeated frames are kept.</p>
+                <table v-if="s.timings.length"><thead><tr><th>Step</th><th>Frame</th><th>Time (ticks)</th></tr></thead><tbody>
+                    <tr v-for="(row,index) in s.timings" :key="index"><td>{{index+1}}</td><td>{{row.index}}</td><td><input type="number" min="1" step="1" :value="row.time" :placeholder="'Default ('+s.frametime+')'" :aria-label="'Time for step '+(index+1)+', frame '+row.index" @input="timing(index,$event)"></td></tr>
+                </tbody></table>
+                <p v-else class="mcpskins-rarity-muted">Open the model or import a texture to set per-frame timings.</p>
+                <p class="mcpskins-rarity-muted">Custom durations are saved for MCPSkins playback. The native Flipbook Editor preview uses its FPS setting.</p>
+            </details>
+            <p class="mcpskins-rarity-muted">20 ticks = 1 second. Native editor FPS is rounded to the nearest whole tick when saved for MCPSkins.</p>
+            <p v-if="s.error || a.error" class="mcpskins-health-error" role="alert">{{s.error || a.error}}</p><p v-if="s.status" role="status">{{s.status}}</p>
+            <button type="button" :disabled="s.busy" @click="save">Save Playback Settings</button>
+        </section>`
+    };
+}
+module.exports={animationComponent};
+
+},
+"src/integration/native-animation.js": function(module, exports, require) {
+'use strict';
+const {positive,pngSize,writeBundle,stripLayout,timingOrder}=require("src/assets/animation.js");
+const {readJSON,isFile}=require("src/storage/files.js");
+const {isObject}=require("src/domain/skin.js");
+
+function saveNativeMetadata(session,info,resetFrames=false) {
+    const {fs,texture}=session;
+    if(session.disposed) return false;
+    if(session.options.canWrite) session.options.canWrite([texture]);
+    const size=pngSize(fs.readFileSync(texture)),width=positive(info.width,'Frame width'),height=positive(info.height,'Frame height');
+    if(size.width!==width || size.height%height) throw new Error('Save the native texture before updating its animation metadata.');
+    const root=isFile(fs,session.metadata)?readJSON(fs,session.metadata):{};
+    if(!isObject(root)) throw new Error('Texture metadata must be an object.');
+    const animation={...(isObject(root.animation)?root.animation:{}),width,height,frametime:positive(info.frametime,'Frame time'),interpolate:!!info.interpolate};
+    if(info.timingsDirty) {
+        const order=timingOrder(info.timings,size.height/height);
+        if(order===null) delete animation.frames;else animation.frames=order;
+    }
+    else if(resetFrames || info.frameOrder===null) delete animation.frames;
+    else if(Array.isArray(info.frameOrder)) animation.frames=info.frameOrder;
+    const metadata={...root,animation};stripLayout(fs.readFileSync(texture),metadata);
+    writeBundle(fs,[[session.metadata,JSON.stringify(metadata,null,2)+'\n']]);
+    session.rootMetadata=metadata;session.saveNativeState(info);
+    Object.assign(session.state,{width,height,frametime:String(animation.frametime),interpolate:animation.interpolate,dirty:false,error:'',status:'Native texture animation metadata saved.'});
+    if(session.options.saved) session.options.saved();
+    return true;
+}
+
+function indexOfFrame(frame) {return isObject(frame)?frame.index:frame;}
+function withFrameExtras(order,reference) {
+    if(!Array.isArray(order) || !Array.isArray(reference)) return order;
+    const queues=new Map();
+    for(const frame of reference) {const index=indexOfFrame(frame);if(!queues.has(index)) queues.set(index,[]);queues.get(index).push(frame);}
+    return order.map(frame=>{
+        const old=queues.get(indexOfFrame(frame))?.shift();
+        if(!isObject(old)) return frame;
+        const merged={...old,index:indexOfFrame(frame)};delete merged.time;
+        if(isObject(frame) && frame.time!==undefined) merged.time=frame.time;
+        return merged;
+    });
+}
+function remapNativeTimings(order,rows,oldCount,newCount) {
+    if(!Array.isArray(order)) return null;
+    if(!Array.isArray(rows)) rows=Array.from({length:newCount},(_,index)=>({initial_index:index<oldCount?index:undefined}));
+    const natural=order.length===oldCount && order.every((frame,index)=>indexOfFrame(frame)===index);
+    const copy=(frame,index)=>isObject(frame)?{...frame,index}:index;
+    let result;
+    if(natural) result=rows.map((row,index)=>copy(order[row.initial_index],index));
+    else {
+        const first=new Map(),added=[];
+        rows.forEach((row,index)=>{
+            if(!Number.isInteger(row.initial_index) || row.initial_index<0 || row.initial_index>=oldCount || first.has(row.initial_index)) added.push({row,index});
+            else first.set(row.initial_index,index);
+        });
+        result=order.filter(frame=>first.has(indexOfFrame(frame))).map(frame=>copy(frame,first.get(indexOfFrame(frame))));
+        for(const {row,index} of added) result.push(copy(order.find(frame=>indexOfFrame(frame)===row.initial_index),index));
+        if(!result.length) result=rows.map((_row,index)=>index);
+    }
+    return result.length===newCount && result.every((frame,index)=>frame===index)?null:result;
+}
+class NativeAnimations {
+    constructor(environment={}) { this.environment=environment;this.records=new Set();this.waits=new Set();this.wrappers=[];this.disposed=false;this.bound=false; }
+    get(name) { return this.environment[name] || globalThis[name]; }
+    bind() {
+        const blockbench=this.get('Blockbench');
+        if(!this.bound && blockbench && typeof blockbench.on==='function') { this.changed=()=>this.capture();blockbench.on('finish_edit',this.changed);this.bound=true; }
+    }
+    info(record) {
+        const {texture,project}=record,active=this.get('Project'),format=this.get('Format');
+        if(active!==project) return record.info;
+        const width=texture.canvas?.width || texture.width;
+        const uvWidth=typeof texture.getUVWidth==='function'?texture.getUVWidth():width;
+        const uvHeight=typeof texture.getUVHeight==='function'?texture.getUVHeight():record.info.height;
+        const height=Math.round(width*uvHeight/uvWidth);
+        const frametime=format?.texture_mcmeta ? texture.frame_time : Math.max(1,Math.round(20/(texture.fps || 20/record.info.frametime)));
+        const info={width,height,frametime,interpolate:!!texture.frame_interpolate};
+        if(typeof texture.getAnimationFrameIndices==='function') info.frameOrder=withFrameExtras(texture.getAnimationFrameIndices(),record.sequenceOverride || record.session.rootMetadata.animation?.frames) || null;
+        else if(record.sequenceOverride!==undefined) info.frameOrder=record.sequenceOverride;
+        return info;
+    }
+    applySessionSettings(session) {
+        const frames=session.rootMetadata.animation?.frames;
+        for(const record of this.records) {
+            if(record.session!==session) continue;
+            const texture=record.texture;
+            texture.fps=20/Number(session.state.frametime);texture.frame_time=Number(session.state.frametime);texture.frame_interpolate=session.state.interpolate;
+            texture.frame_order_type=Array.isArray(frames)?'custom':'loop';
+            texture.frame_order=Array.isArray(frames)?frames.map(frame=>isObject(frame)?frame.time===undefined?frame.index:frame.index+':'+frame.time:frame).join(' '):'';
+            record.info={...record.info,frametime:Number(session.state.frametime),interpolate:session.state.interpolate,frameOrder:frames || null};
+            record.observed=JSON.stringify(record.info);record.pending=false;record.resetFrames=false;record.sequenceOverride=frames || null;
+        }
+    }
+    canDuplicateCurrentFrame() {
+        const texture=this.get('Project') && this.get('Texture')?.selected;
+        return !!(this.get('Format')?.animated_textures && texture?.canvas?.width && texture.canvas.height && !this.get('Dialog')?.open);
+    }
+    duplicateCurrentFrame(session=null) {
+        const project=this.get('Project'),texture=this.get('Texture')?.selected,format=this.get('Format');
+        if(!project || !texture?.canvas || !format?.animated_textures) throw new Error('Select a texture in a model that supports flipbook animation.');
+        if(texture.layers_enabled) throw new Error('Merge the texture layers before duplicating a flipbook frame.');
+        const width=texture.canvas.width,totalHeight=texture.canvas.height;
+        const uvWidth=texture.getUVWidth(),uvHeight=texture.getUVHeight();
+        const height=Math.round(width*uvHeight/uvWidth),count=totalHeight/height;
+        if(!Number.isSafeInteger(height) || height<1 || !Number.isSafeInteger(count) || count<1) throw new Error('Set the flipbook frame dimensions before duplicating a frame.');
+        if(count>=256 || totalHeight+height>16384 || width*(totalHeight+height)>16777216) throw new Error('The new frame would exceed the animation size limit.');
+        const index=Number.isInteger(texture.currentFrame)?Math.max(0,Math.min(texture.currentFrame,count-1)):0;
+        const document=this.get('document'),Undo=this.get('Undo');
+        if(!document || !Undo) throw new Error('The native paint tools are unavailable.');
+        const canvas=document.createElement('canvas');canvas.width=width;canvas.height=totalHeight+height;
+        const context=canvas.getContext('2d');context.imageSmoothingEnabled=false;
+        context.drawImage(texture.canvas,0,0);
+        context.drawImage(texture.canvas,0,index*height,width,height,0,totalHeight,width,height);
+        const animator=this.get('TextureAnimator');if(animator?.isPlaying) animator.stop();
+        Undo.initEdit({textures:[texture],bitmap:true});
+        if(texture.frame_order_type==='custom') {
+            const tokens=String(texture.frame_order || '').trim().split(/\s+/).filter(Boolean);
+            const token=tokens.find(token=>Number(token.split(':')[0])===index),duration=token && token.includes(':')?token.split(':')[1]:'';
+            texture.frame_order=[...tokens,String(count)+(duration?':'+duration:'')].join(' ');
+        }
+        texture.canvas.height=totalHeight+height;
+        (texture.ctx || texture.canvas.getContext('2d')).drawImage(canvas,0,0);
+        texture.width=width;texture.height=totalHeight+height;texture.currentFrame=count;
+        texture.updateChangesAfterEdit();texture.select();
+        Undo.finishEdit('Duplicate current texture frame');
+        if(typeof animator?.update==='function') animator.update([texture]);
+        const uv=this.get('UVEditor');if(uv?.vue && typeof uv.vue.updateTexture==='function') uv.vue.updateTexture();
+        let record=[...this.records].find(record=>record.texture===texture);
+        if(!record && session) {
+            record={texture,project,session,info:{width,height,frametime:Number(session.state.frametime),interpolate:session.state.interpolate},same:(a,b)=>session.paths.path.resolve(a)===session.paths.path.resolve(b)};
+            this.records.add(record);this.bind();
+        }
+        if(record) {record.info=this.info(record);record.observed=JSON.stringify(record.info);record.pending=true;record.resetFrames=false;}
+        return {index:count,count:count+1};
+    }
+    capture() {
+        for(const record of this.records) {
+            try {
+                const info=this.info(record),signature=JSON.stringify(info);
+                if(signature!==record.observed) {record.info=info;record.observed=signature;record.pending=true;}
+            } catch(error) {this.report(record,error);}
+        }
+    }
+    report(record,error) {
+        const message=error.message || String(error),changed=record.session.state.error!==message;
+        record.session.state.error=message;
+        if(changed && record.session.options.error) record.session.options.error(message);
+    }
+    poll() {
+        if(this.disposed) return;
+        this.capture();
+        for(const record of this.records) {
+            if(record.session.state.dirty) continue;
+            if(!record.pending || record.texture.saved!==true) {this.forgetClosed(record);continue;}
+            if(record.same && !record.same(record.texture.path,record.session.texture)) {this.report(record,new Error('Save the texture to its original skin path before updating metadata.'));this.forgetClosed(record);continue;}
+            try {saveNativeMetadata(record.session,record.info,record.resetFrames);record.pending=false;record.resetFrames=false;}
+            catch(error) {this.report(record,error);}
+            this.forgetClosed(record);
+        }
+    }
+    forgetClosed(record) {
+        const projects=this.get('ModelProject');
+        if(projects && Array.isArray(projects.all) && !projects.all.includes(record.project)) this.records.delete(record);
+    }
+    wait(texturePath,same) {
+        return new Promise((resolve,reject)=>{
+            let timer,elapsed=0;
+            const finish=value=>{clearTimeout(timer);this.waits.delete(cancel);resolve(value);};
+            const cancel=()=>finish(null);this.waits.add(cancel);
+            const check=()=>{
+                if(this.disposed) return finish(null);
+                const project=this.get('Project'),TextureClass=this.get('Texture');
+                const texture=project && TextureClass && TextureClass.all.find(texture=>same(texture.path,texturePath));
+                if(texture && texture.canvas?.width && texture.canvas?.height && (!texture.img || (texture.img.complete && texture.img.naturalWidth))) return finish({texture,project});
+                if(elapsed>=120000) {this.waits.delete(cancel);reject(new Error('Select the model geometry, then reopen the Flipbook Editor.'));return;}
+                elapsed+=100;timer=setTimeout(check,100);
+            };check();
+        });
+    }
+    async open(session,same) {
+        const TextureClass=this.get('Texture');
+        const known=this.get('Project') && TextureClass && TextureClass.all.find(texture=>same(texture.path,session.texture));
+        if(known && known.saved===false) throw new Error('Save the open texture before opening its Flipbook Editor.');
+        if(known && typeof known.fromPath==='function') known.fromPath(session.texture);
+        const result=await this.wait(session.texture,same);if(!result || this.disposed) return false;
+        const {texture,project}=result,format=this.get('Format'),action=this.get('BarItems')?.animated_texture_editor;
+        if(!format?.animated_textures || !action || typeof action.click!=='function') throw new Error('The native Flipbook Editor is unavailable for this model format.');
+        const size=pngSize(session.fs.readFileSync(session.texture));
+        if(texture.saved===false) throw new Error('Save the open texture before opening its Flipbook Editor.');
+        const width=size.width,height=Number(session.state.height),frametime=Number(session.state.frametime);
+        if(width!==Number(session.state.width) || size.height%height) throw new Error('Import this strip with its frame dimensions before opening the native editor.');
+        // Bedrock models support flipbook display, but do not write Java-style .mcmeta themselves.
+        if(format.per_texture_uv_size) { texture.uv_width=width;texture.uv_height=height; }
+        else project.texture_height=project.texture_width*height/width;
+        texture.frame_time=frametime;texture.fps=20/frametime;texture.frame_interpolate=!!session.state.interpolate;
+        const root=session.rootMetadata.animation || {};
+        texture.frame_order_type=Array.isArray(root.frames)?'custom':'loop';
+        texture.frame_order=Array.isArray(root.frames)?root.frames.map(frame=>isObject(frame)?frame.time===undefined?frame.index:frame.index+':'+frame.time:frame).join(' '):'';
+        texture.select();
+        let record=[...this.records].find(record=>record.texture===texture);
+        const info={width,height,frametime,interpolate:!!session.state.interpolate};
+        if(!record) {record={texture,project,session,info,pending:false,resetFrames:false};this.records.add(record);}
+        record.sequenceOverride=undefined;record.same=same;record.session=session;record.info=info;record.info=this.info(record);record.observed=JSON.stringify(record.info);this.bind();
+        action.click();
+        const editor=this.get('TextureAnimator')?.editor_dialog;
+        if(editor && typeof editor.onConfirm==='function') {
+            const original=editor.onConfirm,originalCancel=editor.onCancel,self=this;
+            const wrapped=async function(...args) {
+                try {
+                    const previous=record.session.rootMetadata.animation?.frames,oldCount=Math.round(texture.canvas.height/record.info.height);
+                    const rows=Array.isArray(this.content_vue?.frames)?this.content_vue.frames.map(frame=>({initial_index:frame.initial_index})):null;
+                    const result=await original.apply(this,args);
+                    if(result!==false && !self.disposed) {
+                        const stride=Number(this.content_vue?.stride) || record.info.height;
+                        const order=remapNativeTimings(previous,rows,oldCount,Math.round(texture.canvas.height/stride));
+                        texture.frame_order_type=order?'custom':'loop';
+                        texture.frame_order=order?order.map(frame=>isObject(frame)?frame.time===undefined?frame.index:frame.index+':'+frame.time:frame).join(' '):'';
+                        record.sequenceOverride=order;
+                        record.info=self.info(record);
+                        if(stride>0) record.info.height=stride;
+                        record.info.width=texture.canvas.width;
+                        record.observed=JSON.stringify(record.info);record.pending=true;record.resetFrames=false;
+                        self.poll();
+                    }
+                    return result;
+                } catch(error) {self.report(record,error);return false;}
+                finally {restore();}
+            };
+            const cancel=function(...args) {const result=typeof originalCancel==='function'?originalCancel.apply(this,args):undefined;if(result!==false) restore();return result;};
+            const restore=()=>{
+                if(editor.onConfirm===wrapped) editor.onConfirm=original;
+                if(editor.onCancel===cancel) editor.onCancel=originalCancel;
+                const index=self.wrappers.indexOf(restore);if(index>=0) self.wrappers.splice(index,1);
+            };
+            editor.onConfirm=wrapped;editor.onCancel=cancel;this.wrappers.push(restore);
+        }
+        return true;
+    }
+    dispose() {
+        this.disposed=true;this.waits.forEach(cancel=>cancel());this.waits.clear();
+        const blockbench=this.get('Blockbench');if(this.bound && blockbench && typeof blockbench.removeListener==='function') blockbench.removeListener('finish_edit',this.changed);
+        this.wrappers.slice().forEach(restore=>restore());this.wrappers=[];this.records.clear();
+    }
+}
+module.exports={NativeAnimations,saveNativeMetadata,remapNativeTimings};
 
 },
 "src/integration/updates.js": function(module, exports, require) {
@@ -2004,6 +2731,7 @@ const {basename, slugify, isObject} = require("src/domain/skin.js");
 const {readJSON, isFile, isDirectory} = require("src/storage/files.js");
 const {parseJSONC} = require("src/gunpacks/jsonc.js");
 const {modelOutput} = require("src/gunpacks/catalog.js");
+const {animationCopies} = require("src/assets/animation.js");
 
 function assetSelection(paths, draft) {
     const folder = paths.textures(draft.weapon);
@@ -2135,9 +2863,11 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     const targetModel = paths.modelForSkin(targetDraft.weapon, target.id, targetDraft.kind);
     if (targetModel && fs.existsSync(targetModel)) throw new Error('Duplicate model already exists: ' + targetModel);
     if (sourceModel && targetModel && isFile(fs, sourceModel)) copies.push([sourceModel, targetModel]);
+    const frames = animationCopies(fs, paths, source, target);
     const created = [];
     try {
         for (const [from, to] of copies) { fs.mkdirSync(paths.path.dirname(to), {recursive: true}); fs.copyFileSync(from, to, 1); created.push(to); }
+        for (const [file, bytes] of frames) { fs.mkdirSync(paths.path.dirname(file), {recursive: true}); fs.writeFileSync(file, bytes, {flag: 'wx'}); created.push(file); }
     } catch (error) {
         for (const file of created) fs.unlinkSync(file);
         throw error;
@@ -2433,6 +3163,54 @@ function savePackSettings(fs, path, root, folder, namespace) {
 module.exports = {loadPackSettings, savePackSettings};
 
 },
+"src/storage/new-pack.js": function(module, exports, require) {
+'use strict';
+const {PackPaths} = require("src/domain/paths.js");
+const {validComponent} = require("src/domain/skin.js");
+const {isDirectory} = require("src/storage/files.js");
+const {DEFAULT_TITLE} = require("src/storage/pack-metadata.js");
+
+function newPackPaths(path, root, folder, namespace) {
+    root = String(root || '').trim();
+    folder = String(folder || '').trim();
+    namespace = String(namespace || '').trim().toLowerCase();
+    if (!root || !path.isAbsolute(root)) throw new Error('Choose an absolute parent directory for the new pack.');
+    if (!validComponent(folder) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(folder)) {
+        throw new Error('Enter a valid pack folder name without spaces or path separators.');
+    }
+    if (!/^[a-z0-9_][a-z0-9_.-]*$/.test(namespace) || namespace.endsWith('.')) {
+        throw new Error('Use lowercase letters, numbers, underscores, dots, or hyphens for the namespace.');
+    }
+    return new PackPaths(path, root, folder, namespace);
+}
+
+function createPack(fs, paths, values = {}) {
+    if (!isDirectory(fs, paths.root)) throw new Error('The parent directory does not exist.');
+    // Exclusive creation: even an empty existing pack must never be replaced.
+    if (fs.existsSync(paths.pack)) throw new Error('That pack folder already exists. Choose a different folder name.');
+    const directories = [[], ['data'], ['data', paths.namespace], ['data', paths.namespace, 'skins'],
+        ['data', paths.namespace, 'skin_rarities'], ['data', paths.namespace, 'skin_lang'],
+        ['assets'], ['assets', 'mcpskins'], ['assets', 'mcpskins', 'textures'], ['assets', 'mcpskins', 'textures', 'skins']];
+    const created = [];
+    try {
+        for (const parts of directories) {
+            const directory = paths.path.join(paths.pack, ...parts);
+            fs.mkdirSync(directory);
+            created.push(directory);
+        }
+        const metadata = {title: String(values.pack_title || '').trim() || DEFAULT_TITLE, author: String(values.pack_author || '').trim()};
+        fs.writeFileSync(paths.path.join(paths.pack, 'mcpskins_manager.json'), JSON.stringify(metadata, null, 2) + '\n', {encoding: 'utf8', flag: 'wx'});
+        return metadata;
+    } catch (error) {
+        // Only remove empty directories made by this attempt; retain any files another process added.
+        for (const directory of created.reverse()) { try { fs.rmdirSync(directory); } catch { /* Preserve nonempty directories. */ } }
+        throw error;
+    }
+}
+
+module.exports = {newPackPaths, createPack};
+
+},
 "src/storage/recent-packs.js": function(module, exports, require) {
 'use strict';
 const {packDirectorySelection} = require("src/domain/paths.js");
@@ -2543,7 +3321,25 @@ function checkPack(fs, paths) {
                     const integer = offset => bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3];
                     const width = integer(16), height = integer(20);
                     if (!width || !height) throw new Error('Invalid image dimensions.');
-                    if ((kind === 'HUD' && width !== height * 3) || (kind === 'Icon' && width !== height)) issue('warning', `${kind} aspect ratio should be ${kind === 'HUD' ? '3:1' : '1:1'}; found ${width} x ${height}.`, file);
+                    let frameWidth=width, frameHeight=height;
+                    if(isFile(fs,file+'.mcmeta')) {
+                        try {
+                            const metadata=readJSON(fs,file+'.mcmeta'), animation=metadata.animation;
+                            if(animation!==undefined) {
+                                if(!isObject(animation)) throw new Error('Expected an animation object.');
+                                frameWidth=animation.width ?? Math.min(width,height); frameHeight=animation.height ?? Math.min(width,height);
+                                if(!Number.isSafeInteger(frameWidth) || frameWidth<1 || !Number.isSafeInteger(frameHeight) || frameHeight<1 || width%frameWidth || height%frameHeight) throw new Error('Frame dimensions must divide the image dimensions.');
+                                if(animation.frametime!==undefined && (!Number.isSafeInteger(animation.frametime) || animation.frametime<1)) throw new Error('Frame time must be a positive whole number.');
+                                if(animation.interpolate!==undefined && typeof animation.interpolate!=='boolean') throw new Error('Interpolation must be true or false.');
+                                const count=width/frameWidth*(height/frameHeight);
+                                if(animation.frames!==undefined && (!Array.isArray(animation.frames) || !animation.frames.length || animation.frames.some(frame=>{
+                                    const index=isObject(frame)?frame.index:frame;
+                                    return !Number.isSafeInteger(index) || index<0 || index>=count || (isObject(frame) && frame.time!==undefined && (!Number.isSafeInteger(frame.time) || frame.time<1));
+                                }))) throw new Error('Animation contains invalid frame indices or durations.');
+                            }
+                        } catch(error) { issue('warning','Animation metadata: '+error.message,file+'.mcmeta'); }
+                    }
+                    if ((kind === 'HUD' && frameWidth !== frameHeight * 3) || (kind === 'Icon' && frameWidth !== frameHeight)) issue('warning', `${kind} aspect ratio should be ${kind === 'HUD' ? '3:1' : '1:1'}; found ${frameWidth} x ${frameHeight}.`, file);
                 } catch (error) { issue('error', `${kind} texture: ${error.message}`, file); }
             }
         });
@@ -2832,12 +3628,12 @@ function confirmUnsaved(options = {}) {
     }, result => resolve(result === 0 ? 'save' : result === 1 ? 'discard' : 'cancel')));
 }
 
-function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {}) {
+function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {}, createPack = null) {
     let applying = false;
     const submit = (values, connection) => {
         if (applying) return;
         applying = true;
-        return Promise.resolve(apply(values, connection)).then(ok => { if (ok) dialog.hide(); })
+        return Promise.resolve(apply(values, connection)).then(ok => { if (ok) dialog.hide(); return ok; })
             .catch(error => message('Pack not applied', error.message)).finally(() => { applying = false; });
     };
     const dialog = new Dialog('mcpskins_pack', {
@@ -2849,7 +3645,7 @@ function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {
             connection = null;
             dialog.setFormValues({pack_directory: entry.directory, pack_namespace: entry.namespace, pack_author: currentAuthor});
             return submit({pack_directory: entry.directory, pack_namespace: entry.namespace}, null);
-        }),
+        }, createPack ? () => createPack(submit) : null),
         form: {
             pack_directory: {label: 'Pack Directory', type: 'folder', value: initial.directory},
             pack_namespace: {label: 'Pack Namespace', type: 'text', value: initial.namespace},
@@ -2887,11 +3683,12 @@ function packDialog(initial, readPack, apply, recents = [], saveAuthor = () => {
     return dialog;
 }
 
-function recentPacksComponent(entries, select) {
+function recentPacksComponent(entries, select, createPack = null) {
     return {
-        data() { return {entries}; },
-        methods: {select(entry) { return select(entry); }},
+        data() { return {entries, canCreate: !!createPack}; },
+        methods: {select(entry) { return select(entry); }, createPack() { if (createPack) return createPack(); }},
         template: `<section class="mcpskins-recent-packs">
+            <button v-if="canCreate" class="mcpskins-new-pack" type="button" @click="createPack">New Pack</button>
             <h3>Recent Packs</h3>
             <div v-if="entries.length" class="mcpskins-recent-scroll"><table>
                 <thead><tr><th>Name</th><th>Author</th><th>Path</th></tr></thead>
@@ -2902,6 +3699,31 @@ function recentPacksComponent(entries, select) {
             <p v-else class="mcpskins-muted">Selected packs will appear here.</p>
         </section>`
     };
+}
+
+function newPackDialog(root, create, cancel = () => {}) {
+    let applying = false;
+    const dialog = new Dialog('mcpskins_new_pack', {
+        title: 'New MCPSkins Pack', width: 640,
+        confirm_text: 'Create Pack',
+        form: {
+            parent_directory: {label: 'Parent Directory', type: 'folder', value: root || '', description: 'Choose your mcpskins directory. The new pack folder will be created inside it.'},
+            pack_folder: {label: 'Folder Name', type: 'text', value: '', placeholder: 'my_pack'},
+            pack_namespace: {label: 'Namespace', type: 'text', value: 'my_pack'},
+            pack_title: {label: 'Pack Name', type: 'text', value: 'Pack Name'},
+            pack_author: {label: 'Author', type: 'text', value: '', placeholder: '(Optional)'}
+        },
+        onCancel() { queueMicrotask(cancel); },
+        onConfirm(values) {
+            if (applying) return false;
+            applying = true;
+            Promise.resolve().then(() => create(values)).then(ok => { if (ok) dialog.hide(); })
+                .catch(error => message('Pack not created', error.message)).finally(() => { applying = false; });
+            return false;
+        }
+    });
+    dialog.show();
+    return dialog;
 }
 
 function colorDialog(color, apply) {
@@ -2936,7 +3758,7 @@ function namePrefixDialog(weapon, accept, cancel) {
     return dialog;
 }
 
-module.exports = {recentPacksComponent, message, confirmUnsaved, packDialog, colorDialog, namePrefixDialog};
+module.exports = {recentPacksComponent, message, confirmUnsaved, packDialog, newPackDialog, colorDialog, namePrefixDialog};
 
 },
 "src/assets/previews.js": function(module, exports, require) {
@@ -3036,9 +3858,10 @@ class BlockbenchBridge {
         const paths = [texture, normal, specular].filter(Boolean);
         const known = paths.map(filename => Texture.all.find(t => this.same(t.path, filename)));
         // Reuse in-memory painted textures without re-reading or replacing their pixels.
+        const needsApply = !!files.animationFrame || !!(project.mcpskins_asset && !this.same(project.mcpskins_asset.texture, texture));
         const needsImport = known.some(t => !t);
         const needsOrder = known.some((t, index) => t && Texture.all[index] !== t);
-        if (!needsImport && !needsOrder) { known[0].select(); return; }
+        if (!needsImport && !needsOrder && !needsApply) { known[0].select(); return; }
         const textures = Texture.all.slice();
         Undo.initEdit({textures, elements: Cube.all.slice(), texture_order: true, selected_texture: true});
         const imported = paths.map((filename, index) => {
@@ -3050,7 +3873,7 @@ class BlockbenchBridge {
             return entry;
         });
         const base = imported[0];
-        if (!known[0]) {
+        if (!known[0] || needsApply) {
             Cube.all.forEach(cube => cube.applyTexture(base, true));
             if (typeof base.setAsDefaultTexture === 'function') base.setAsDefaultTexture();
         }
@@ -3319,6 +4142,7 @@ function panelComponent(controller) {
                                 <details v-if="!bulk" class="mcpskins-previews" open><summary>Textures</summary>
                                     <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button></div>
                                     <figure v-for="card in s.previews" :key="card.kind"><figcaption>{{card.label}}</figcaption><div :class="['mcpskins-preview',card.kind]"><img v-if="card.source" :src="card.source" :alt="card.filename" @load="imageLoaded(card,$event)" @error="imageFailed(card)"><span v-else>{{card.message}}<small v-if="card.ratio" class="mcpskins-aspect">Recommended aspect ratio {{card.ratio}}</small></span></div><p class="mcpskins-muted">{{card.filename}}<br>{{card.dimensions}}</p></figure>
+                                    <div class="mcpskins-asset-actions mcpskins-animation-action"><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
                                 </details>
                             </div>
                         </template>
@@ -3660,6 +4484,20 @@ module.exports = {StartScreenView};
 "src/ui/styles.js": function(module, exports, require) {
 'use strict';
 module.exports = `
+.mcpskins-animation {max-height:72vh;overflow:auto;container-type:inline-size;font-size:13px}
+.mcpskins-animation h3 {font-size:14px;font-weight:700;border-top:1px solid var(--color-border);padding-top:12px;margin-top:14px}
+.mcpskins-animation label {display:flex;flex-direction:column;gap:4px;margin:8px 0}
+.mcpskins-animation input:not([type=checkbox]),.mcpskins-animation select {background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px;padding:5px;min-height:28px;max-width:100%}
+.mcpskins-animation button {min-width:0}
+.mcpskins-animation-toolbar {display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}
+.mcpskins-animation .mcpskins-animation-check {flex-direction:row;align-items:center;gap:7px}
+.mcpskins-frame-timings {border:1px solid var(--color-border);border-radius:4px;padding:8px;margin:10px 0}
+.mcpskins-frame-timings summary {cursor:pointer;font-weight:600}
+.mcpskins-frame-timings table {border-collapse:collapse;width:100%;text-align:left}
+.mcpskins-frame-timings th,.mcpskins-frame-timings td {padding:6px;border-bottom:1px solid var(--color-border)}
+.mcpskins-frame-timings input {width:150px}
+.mcpskins-animation-dimensions {display:flex;gap:8px}
+.mcpskins-animation-dimensions label {min-width:0;flex:1}
 .mcpskins-rarity-manager {font-size:13px;container-type:inline-size;max-height:72vh;overflow:auto;padding:0 3px 6px}
 .mcpskins-rarity-layout {display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,1fr);gap:18px}
 .mcpskins-rarity-browser,.mcpskins-rarity-inspector {min-width:0}
@@ -3693,6 +4531,7 @@ module.exports = `
 .mcpskins-rarity-targets {border:1px solid var(--color-border);padding:8px;border-radius:4px}
 @container (max-width:650px) {.mcpskins-rarity-layout {grid-template-columns:1fr}.mcpskins-rarity-inspector {border-left:0;border-top:1px solid var(--color-border);padding:12px 0 0}}
 .mcpskins-recent-packs {margin:18px 0 0}
+.mcpskins-recent-packs .mcpskins-new-pack {margin-bottom:14px}
 .mcpskins-recent-packs h3 {font-size:14px;margin:0 0 8px}
 .mcpskins-recent-scroll {max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:3px}
 .mcpskins-recent-packs table {border-collapse:collapse;width:100%;text-align:left;font-size:13px}
@@ -3818,6 +4657,7 @@ module.exports = `
 .mcpskins .mcpskins-check input[type=checkbox]::before {display:block;line-height:1}
 .mcpskins-title {display:block;overflow-wrap:anywhere}
 .mcpskins-color,.mcpskins-save,.mcpskins-asset-actions {display:flex;gap:6px;flex-wrap:wrap}
+.mcpskins-animation-action {margin-top:12px}
 .mcpskins-color input {width:100px;flex:1;min-width:80px}
 .mcpskins-color .mcpskins-swatch {width:30px;min-width:30px}
 .mcpskins-previews {margin-top:12px;min-width:0}

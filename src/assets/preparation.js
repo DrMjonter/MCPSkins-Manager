@@ -3,6 +3,7 @@ const {basename, slugify, isObject} = require('../domain/skin');
 const {readJSON, isFile, isDirectory} = require('../storage/files');
 const {parseJSONC} = require('../gunpacks/jsonc');
 const {modelOutput} = require('../gunpacks/catalog');
+const {animationCopies} = require('./animation');
 
 function assetSelection(paths, draft) {
     const folder = paths.textures(draft.weapon);
@@ -134,9 +135,11 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     const targetModel = paths.modelForSkin(targetDraft.weapon, target.id, targetDraft.kind);
     if (targetModel && fs.existsSync(targetModel)) throw new Error('Duplicate model already exists: ' + targetModel);
     if (sourceModel && targetModel && isFile(fs, sourceModel)) copies.push([sourceModel, targetModel]);
+    const frames = animationCopies(fs, paths, source, target);
     const created = [];
     try {
         for (const [from, to] of copies) { fs.mkdirSync(paths.path.dirname(to), {recursive: true}); fs.copyFileSync(from, to, 1); created.push(to); }
+        for (const [file, bytes] of frames) { fs.mkdirSync(paths.path.dirname(file), {recursive: true}); fs.writeFileSync(file, bytes, {flag: 'wx'}); created.push(file); }
     } catch (error) {
         for (const file of created) fs.unlinkSync(file);
         throw error;

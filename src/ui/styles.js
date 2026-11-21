@@ -1,5 +1,19 @@
 'use strict';
 module.exports = `
+.mcpskins-animation {max-height:72vh;overflow:auto;container-type:inline-size;font-size:13px}
+.mcpskins-animation h3 {font-size:14px;font-weight:700;border-top:1px solid var(--color-border);padding-top:12px;margin-top:14px}
+.mcpskins-animation label {display:flex;flex-direction:column;gap:4px;margin:8px 0}
+.mcpskins-animation input:not([type=checkbox]),.mcpskins-animation select {background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px;padding:5px;min-height:28px;max-width:100%}
+.mcpskins-animation button {min-width:0}
+.mcpskins-animation-toolbar {display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}
+.mcpskins-animation .mcpskins-animation-check {flex-direction:row;align-items:center;gap:7px}
+.mcpskins-frame-timings {border:1px solid var(--color-border);border-radius:4px;padding:8px;margin:10px 0}
+.mcpskins-frame-timings summary {cursor:pointer;font-weight:600}
+.mcpskins-frame-timings table {border-collapse:collapse;width:100%;text-align:left}
+.mcpskins-frame-timings th,.mcpskins-frame-timings td {padding:6px;border-bottom:1px solid var(--color-border)}
+.mcpskins-frame-timings input {width:150px}
+.mcpskins-animation-dimensions {display:flex;gap:8px}
+.mcpskins-animation-dimensions label {min-width:0;flex:1}
 .mcpskins-rarity-manager {font-size:13px;container-type:inline-size;max-height:72vh;overflow:auto;padding:0 3px 6px}
 .mcpskins-rarity-layout {display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,1fr);gap:18px}
 .mcpskins-rarity-browser,.mcpskins-rarity-inspector {min-width:0}
@@ -33,6 +47,7 @@ module.exports = `
 .mcpskins-rarity-targets {border:1px solid var(--color-border);padding:8px;border-radius:4px}
 @container (max-width:650px) {.mcpskins-rarity-layout {grid-template-columns:1fr}.mcpskins-rarity-inspector {border-left:0;border-top:1px solid var(--color-border);padding:12px 0 0}}
 .mcpskins-recent-packs {margin:18px 0 0}
+.mcpskins-recent-packs .mcpskins-new-pack {margin-bottom:14px}
 .mcpskins-recent-packs h3 {font-size:14px;margin:0 0 8px}
 .mcpskins-recent-scroll {max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:3px}
 .mcpskins-recent-packs table {border-collapse:collapse;width:100%;text-align:left;font-size:13px}
@@ -158,6 +173,7 @@ module.exports = `
 .mcpskins .mcpskins-check input[type=checkbox]::before {display:block;line-height:1}
 .mcpskins-title {display:block;overflow-wrap:anywhere}
 .mcpskins-color,.mcpskins-save,.mcpskins-asset-actions {display:flex;gap:6px;flex-wrap:wrap}
+.mcpskins-animation-action {margin-top:12px}
 .mcpskins-color input {width:100px;flex:1;min-width:80px}
 .mcpskins-color .mcpskins-swatch {width:30px;min-width:30px}
 .mcpskins-previews {margin-top:12px;min-width:0}
