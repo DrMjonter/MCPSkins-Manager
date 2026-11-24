@@ -18,7 +18,7 @@ function collectionComponent(editor) {
             exclude(id,event) { editor.exclude(id,event.target.checked); }, percent(value) { return (value*100).toFixed(2)+'%'; }
         },
         template: `<section class="mcpskins-rarity-manager mcpskins-collections">
-            <p class="mcpskins-rarity-muted">Collection Cases settings for this pack. Blank fields inherit Global Defaults, then the addon's defaults. Save and use /reload in game.</p>
+            <p class="mcpskins-rarity-muted">Collections and metadata for this pack. Most of this is optional and only needed when using Collection Cases.</p>
             <details v-if="c.warnings.length"><summary>{{c.warnings.length}} collection issue(s)</summary><p v-for="(warning,index) in c.warnings" :key="index">{{warning}}</p></details>
             <div class="mcpskins-rarity-layout"><section class="mcpskins-rarity-browser" aria-label="Collection list">
                 <div class="mcpskins-rarity-toolbar"><input type="search" v-model="c.search" placeholder="Search collections..." aria-label="Search collections"><button type="button" :disabled="c.busy" @click="create">New Collection</button></div>

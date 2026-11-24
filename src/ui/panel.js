@@ -11,6 +11,7 @@ const {baseWeapon, defaultColor} = require('../domain/skin');
 const {variantEditor} = require('./variant-editor');
 const {fieldHelp} = require('./field-help');
 const {weaponPicker} = require('./weapon-picker');
+const {collectionPicker} = require('./collection-picker');
 const LIGHT_PALETTES = {
     'Frutiger Aero': {panel: '#E8F5FC', field: '#F7FCFF', text: '#163C57', muted: '#456A80', border: '#A5C7DA', accent: '#087DB9', selected: '#B8DEF5'},
     Neo: {...THEMES.Neo, muted: '#526B7C', accent: '#B94229'},
@@ -20,7 +21,7 @@ const LIGHT_PALETTES = {
 function panelComponent(controller) {
     const manager = controller.manager;
     return {
-        components: {'field-help': fieldHelp, 'weapon-picker': weaponPicker, 'variant-editor': variantEditor},
+        components: {'field-help': fieldHelp, 'weapon-picker': weaponPicker, 'collection-picker':collectionPicker, 'variant-editor': variantEditor},
         data() { return {pluginTitle: PLUGIN_TITLE, settingsIcon: icons.settings, s: manager.state, listHeightDraft:null, listMaximum:MAX_LIST_HEIGHT, titleEditing: false, titleDraft: '', titlePack: '', titleSaving: false, themes: ['Blockbench', ...Object.keys(THEMES)]}; },
         computed: {
             listHeight() { return Math.min(this.listMaximum,this.listHeightDraft ?? this.s.settings.appearance.listHeight); },
@@ -56,6 +57,7 @@ function panelComponent(controller) {
             },
             weaponOptions() { return weaponSuggestions(this.s.gunPackItems, this.s.draft.kind); },
             collections() { return manager.collections(); },
+            collectionOptions() { return [...this.s.collectionOptions,...manager.collections()]; },
             rows() { return manager.filteredRows(); },
             hiddenSelectedCount() {
                 const visible = new Set(this.rows.map(row => row.key));
@@ -139,13 +141,16 @@ function panelComponent(controller) {
             editVariants(value) { controller.edit('variants', value); },
             editLevels(value) { controller.edit('levels', value); },
             editWeapon(value) { controller.edit('weapon', value); },
+            editCollection(value) { controller.edit('collection',value); },
+            refreshCollections() { controller.run(()=>controller.refreshCollectionOptions()); },
+            newCollection() { return controller.openCollections(true); },
             commitWeapon() { controller.commitWeapon(); },
             command(name) { controller[name](); },
             select(row, event) { controller.select(row, event); },
             sort(column) { manager.sort(column); },
             heading(column, label) { return label + (this.s.sortColumn === column ? (this.s.descending ? ' ▼' : ' ▲') : ''); },
             gun(row) { return manager.prefixFor(baseWeapon(row.data)); },
-            status(row) { return rowStatus(this.s.packMetadata, manager.repository.paths, row); },
+            status(row) { return rowStatus(this.s.packMetadata, manager.repository.paths, row,this.s.settings.customStatuses); },
             rowToken(row) { return encodeURIComponent(row.key); },
             filename(row) { return controller.desktop.path.basename(row.filename); },
             rarityName(rarity) {
@@ -169,6 +174,7 @@ function panelComponent(controller) {
                         <button type="button" class="mcpskins-secondary mcpskins-health-button" @click="command('healthCheck')" :data-health="s.health.status" :title="healthTitle" :aria-label="healthTitle"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false"><path v-if="s.health.status === 'error'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/><template v-else-if="s.health.status === 'warning'"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 3L2 21h20z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 9v5m0 3v.2"/></template><path v-else-if="s.health.status === 'good'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M4 12l5 5L20 6"/><path v-else fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" d="M12 3a9 9 0 100 18 9 9 0 000-18"/></svg></button>
                     </template>
                     <button type="button" class="mcpskins-secondary" @click="command('configure')" title="Choose pack directory and namespace">Select Pack</button>
+                    <button v-if="s.ready" type="button" class="mcpskins-secondary" title="Export the pack as a ZIP" @click="command('openExport')">Export...</button>
                     <button type="button" class="mcpskins-secondary mcpskins-help-button" @click="command('showSettings')" title="Settings" aria-label="Settings"><img :src="settingsIcon" alt="" aria-hidden="true"></button>
                 </div>
             </header>
@@ -180,7 +186,7 @@ function panelComponent(controller) {
                 <p class="mcpskins-path" :title="s.directory">{{s.folder}} / {{s.namespace}}<br>{{s.directory}}</p>
                 <p v-if="s.notice" class="mcpskins-notice" role="status">{{s.notice}}</p>
                 <details v-if="s.warnings.length" class="mcpskins-warnings"><summary>{{s.warnings.length}} file(s) skipped</summary><p v-for="warning in s.warnings.slice(0, 10)">{{warning}}</p></details>
-                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" title="Edit TACZ gun pack directory" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" title="Edit and create rarities" @click="command('openRarities')">Rarities</button><button type="button" title="Edit collection metadata for CollectionCases mod" @click="command('openCollections')">Collection Cases</button></div>
+                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" title="Edit TACZ gun pack directory" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" title="Edit and create rarities" @click="command('openRarities')">Rarities</button><button type="button" title="Edit collection metadata for CollectionCases mod" @click="command('openCollections')">Collections Manager</button></div>
                 <details v-if="s.gunPackWarnings.length" class="mcpskins-warnings"><summary>{{s.gunPackWarnings.length}} gun-pack warning(s)</summary><p v-for="warning in s.gunPackWarnings.slice(0, 20)">{{warning}}</p></details>
                 <div class="mcpskins-workspace">
                     <section class="mcpskins-browser" aria-label="Skin browser">
@@ -221,7 +227,7 @@ function panelComponent(controller) {
                                         <label><span>Skin name <field-help name="Skin name"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span> <span class="mcpskins-muted mcpskins-title">{{title}}</span><input aria-label="Skin name" :disabled="bulk" :value="bulk ? '' : s.draft.label" @input="edit('label',$event)"></label>
                                         <label class="mcpskins-check"><input type="checkbox" :disabled="bulk" :checked="s.draft.override_prefix" @change="edit('override_prefix',$event)"><span>Override name prefix <field-help name="Override name prefix"></field-help></span></label>
                                         <label v-if="s.draft.override_prefix"><span>Name prefix <field-help name="Name prefix"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><input :disabled="bulk" :value="s.draft.name_prefix" @input="edit('name_prefix',$event)" placeholder="Custom weapon name"></label>
-                                        <label><span>Collection <field-help name="Collection"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><input :placeholder="bulk && s.mixed.collection ? 'Mixed values' : ''" :value="s.draft.collection" @input="edit('collection',$event)"></label>
+                                        <label><span>Collection <field-help name="Collection"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><collection-picker :value="s.draft.collection" :collections="collectionOptions" :mixed="bulk && !!s.mixed.collection" @input="editCollection" @open="refreshCollections" @create="newCollection"></collection-picker></label>
                                         <label><span>Subtitle <field-help name="Subtitle"></field-help></span><span v-if="s.draft.invalid_subtitle" class="mcpskins-muted">Invalid saved value; edit to replace it.</span><input :placeholder="bulk && s.mixed.subtitle ? 'Mixed values' : '(Optional)'" :value="s.draft.subtitle" @input="edit('subtitle',$event)"></label>
                                         <label><span>Skin author <field-help name="Skin author"></field-help></span> <span v-if="s.draft.invalid_author || (!bulk && fileAuthor)" class="mcpskins-muted"><span v-if="s.draft.invalid_author"> Invalid saved value; edit to replace it.</span><span v-if="!bulk && fileAuthor"> File default: {{fileAuthor}}.</span></span><input :placeholder="bulk && s.mixed.author ? 'Mixed values' : '(Optional)'" :value="s.draft.author" @input="edit('author',$event)"></label>
                                         <label><span>Rarity <field-help name="Rarity"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><select :value="s.draft.rarity" @change="edit('rarity',$event)"><option v-if="bulk && s.mixed.rarity" value="" disabled>Mixed values</option><option v-for="rarity in rarities" :key="rarity.id" :value="rarity.id">{{rarity.name}}</option></select></label>
@@ -245,10 +251,14 @@ function panelComponent(controller) {
                                     <p class="mcpskins-muted">Only Save Skin writes registry changes. Model and texture edits use Blockbench’s save commands.</p>
                                 </form>
                                 <details v-if="!bulk" class="mcpskins-previews" open><summary>Textures</summary>
-                                    <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button></div>
+                                    <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
                                     <div v-if="['gun','attachment'].includes(s.draft.kind)" class="mcpskins-model-mode"><button type="button" :disabled="!s.selectedKey || s.dirty || s.duplicatePending" @click="command('toggleCustomModel')" :title="s.customModel ? 'Disable the geometry override and keep the model as an editing reference' : 'Enable this skin geometry as an in-game model override'">{{s.customModel ? 'Use Stock Model' : 'Use Custom Model'}}</button><small class="mcpskins-muted">{{s.customModel ? 'Custom geometry is enabled in game.' : 'Stock geometry in game. Open Model uses an editing reference.'}}</small></div>
+                                    <section v-if="s.draft.kind==='gun'" class="mcpskins-lod"><h4>LOD</h4>
+                                        <div v-for="file in s.lodFiles" :key="file.kind" class="mcpskins-lod-file"><span class="mcpskins-lod-status" :class="'mcpskins-lod-'+file.status" :title="file.message" :aria-label="file.status+': '+file.message">{{file.status==='valid'?'✓':file.status==='invalid'?'!':'×'}}</span><span>{{file.label}}<small class="mcpskins-muted" :title="file.path">{{file.filename}}</small></span></div>
+                                        <button type="button" :disabled="!s.selectedKey || s.dirty || s.duplicatePending" @click="command('generateLOD')" title="Copy the saved full model and painted textures, including normal and specular maps, for LOD use">Generate LODs</button>
+                                    </section>
                                     <figure v-for="card in s.previews" :key="card.kind"><figcaption>{{card.label}}</figcaption><div :class="['mcpskins-preview',card.kind]"><img v-if="card.source" :src="card.source" :alt="card.filename" @load="imageLoaded(card,$event)" @error="imageFailed(card)"><span v-else>{{card.message}}<small v-if="card.ratio" class="mcpskins-aspect">Recommended aspect ratio {{card.ratio}}</small></span></div><p class="mcpskins-muted">{{card.filename}}<br>{{card.dimensions}}</p></figure>
-                                    <div class="mcpskins-asset-actions mcpskins-animation-action"><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
+
                                 </details>
                             </div>
                         </template>

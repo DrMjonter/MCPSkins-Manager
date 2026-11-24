@@ -14,6 +14,7 @@ function healthComponent(report, select, reveal, setIgnored = null) {
         },
         template: `<section class="mcpskins-health">
             <p>{{report.skins}} skins in {{report.files}} registry files checked. <strong>{{errors}} errors, {{warnings}} warnings.</strong> <span v-if="ignoredIssues.length">{{ignoredIssues.length}} ignored.</span></p>
+            <p v-if="report.skipped" class="mcpskins-muted">{{report.skipped}} skin(s) skipped because their status order is 5 or lower.</p>
             <p class="mcpskins-muted">Checks saved files. Warnings can be optionally ignored</p>
             <p v-if="!activeIssues.length">No active issues found.</p>
             <div v-else class="mcpskins-health-list"><article v-for="(issue,index) in activeIssues" :key="index">

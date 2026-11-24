@@ -2,7 +2,7 @@
 const {basename, slugify, isObject} = require('../domain/skin');
 const {readJSON, isFile, isDirectory} = require('../storage/files');
 const {parseJSONC} = require('../gunpacks/jsonc');
-const {modelOutput} = require('../gunpacks/catalog');
+const {modelOutput,modelKey} = require('../gunpacks/catalog');
 const {animationCopies} = require('./animation');
 
 function assetSelection(paths, draft) {
@@ -146,7 +146,7 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     const source = assetSelection(paths, sourceDraft), target = assetSelection(paths, targetDraft);
     if (source.folder !== target.folder || source.id === target.id) throw new Error('Choose a different skin ID for the duplicate.');
     const copies = [];
-    for (const extension of ['.json', '.geo.json', '.png', '_n.png', '_s.png', '_hud.png', '_icon.png', '_hud_empty.png', '_lod.png', '.png.mcmeta', '_n.png.mcmeta', '_s.png.mcmeta', '_hud.png.mcmeta', '_hud_empty.png.mcmeta', '_icon.png.mcmeta', '_lod.png.mcmeta']) {
+    for (const extension of ['.json', '.geo.json', '.png', '_n.png', '_s.png', '_hud.png', '_icon.png', '_hud_empty.png', '_lod.png', '_lod_n.png','_lod_s.png', '.png.mcmeta', '_n.png.mcmeta', '_s.png.mcmeta', '_hud.png.mcmeta', '_hud_empty.png.mcmeta', '_icon.png.mcmeta', '_lod.png.mcmeta','_lod_n.png.mcmeta','_lod_s.png.mcmeta']) {
         const from = paths.path.join(source.folder, source.id + extension), to = paths.path.join(target.folder, target.id + extension);
         if (fs.existsSync(to)) throw new Error(`Duplicate asset already exists: ${to}`);
         if (isFile(fs, from)) copies.push([from, to]);
@@ -155,6 +155,14 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     const targetModel = paths.modelForSkin(targetDraft.weapon, target.id, targetDraft.kind);
     if (targetModel && fs.existsSync(targetModel)) throw new Error('Duplicate model already exists: ' + targetModel);
     if (sourceModel && targetModel && isFile(fs, sourceModel)) copies.push([sourceModel, targetModel]);
+    if(sourceDraft.kind==='gun') {
+        const key=modelKey(sourceDraft.weapon,sourceDraft.kind),reference=Object.hasOwn(paths.lodReferences,key)?paths.lodReferences[key]:sourceDraft.weapon.startsWith('tacz:')?'tacz:gun/lod/'+source.gun:null;
+        if(typeof reference==='string') {
+            const from=modelOutput(paths,reference,source.id),to=modelOutput(paths,reference,target.id);
+            if(fs.existsSync(to))throw new Error('Duplicate LOD model already exists: '+to);
+            if(isFile(fs,from))copies.push([from,to]);
+        }
+    }
     const frames = animationCopies(fs, paths, source, target);
     const created = [];
     try {

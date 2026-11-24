@@ -5,10 +5,11 @@ const {variantIssues} = require('../domain/variants');
 const {scanRarities} = require('../storage/rarities');
 const {scanCollections, collectionIssues} = require('../storage/collections');
 const {readJSON, isFile, isDirectory} = require('../storage/files');
+const {rowStatus} = require('../domain/status');
 
 function checkPack(fs, paths, options = {}) {
     const issues = [];
-    let files = 0, skins = 0;
+    let files = 0, skins = 0, skipped = 0;
     const add = (severity, message, filename, row = null) => issues.push({severity, message, filename,
         rowKey: row ? row.key : '', skinId: row ? String(row.skin.id ?? '') : '', registry: row ? row.filename : filename});
     const {rarities, warnings: rarityWarnings} = scanRarities(fs, paths);
@@ -20,7 +21,7 @@ function checkPack(fs, paths, options = {}) {
     try { metadata = loadPackMetadata(fs, paths); } catch (error) { add('error', `Invalid pack metadata: ${error.message}`, metadataFile(paths)); }
     if (!isDirectory(fs, paths.registryDirectory)) {
         add('error', 'The skins registry directory is missing.', paths.registryDirectory);
-        return {issues, files, skins};
+        return {issues, files, skins, skipped};
     }
     for (const name of fs.readdirSync(paths.registryDirectory).filter(name => name.endsWith('.json')).sort()) {
         const filename = paths.path.join(paths.registryDirectory, name);
@@ -37,13 +38,15 @@ function checkPack(fs, paths, options = {}) {
         if (data.author !== undefined && typeof data.author !== 'string') add('error', 'File author must be text.', filename);
         for (const problem of variantIssues(data.skins)) {
             const row = {key: `${filename}\0${problem.index}`, filename, skin: data.skins[problem.index]};
+            if(options.skipLowOrder===true && (rowStatus(metadata,paths,row,options.customStatuses)?.order ?? 0)<=5)continue;
             add('error', problem.message, filename, row);
         }
         const ids = new Set();
         data.skins.forEach((skin, index) => {
             if (!isObject(skin)) { add('error', `Entry ${index + 1} is not a skin object.`, filename); return; }
-            skins++;
             const row = {key: `${filename}\0${index}`, filename, data, index, skin};
+            if(options.skipLowOrder===true && (rowStatus(metadata,paths,row,options.customStatuses)?.order ?? 0)<=5){skipped++;return;}
+            skins++;
             const issue = (severity, message, file = filename) => add(severity, message, file, row);
             for (const field of ['author', 'subtitle']) if (skin[field] !== undefined && typeof skin[field] !== 'string') issue('error', field + ' must be text.');
             if (skin.limited !== undefined && typeof skin.limited !== 'boolean') issue('error', 'limited must be true or false.');
@@ -108,6 +111,6 @@ function checkPack(fs, paths, options = {}) {
     }
     if (!files) add('warning', 'No skin registry files found.', paths.registryDirectory);
     issues.sort((a, b) => (a.severity === 'error' ? 0 : 1) - (b.severity === 'error' ? 0 : 1));
-    return {issues, files, skins};
+    return {issues, files, skins, skipped};
 }
 module.exports = {checkPack};

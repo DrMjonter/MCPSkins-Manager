@@ -127,7 +127,7 @@ class CollectionRepository {
             } catch { failures.push(write.filename); }
             throw new Error(error.message + (failures.length ? ' Could not restore: ' + failures.join(', ') : ''));
         }
-        return {key, filename, renamed:rename};
+        return {key, filename, renamed:rename,created:!selected};
     }
 }
 module.exports = {scanCollections, collectionIssues, CollectionRepository};

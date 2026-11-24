@@ -132,6 +132,29 @@ module.exports = `
 .mcpskins-settings-footer > p {font-size:11px}
 .mcpskins-settings-reset {border-top:1px solid var(--color-border);margin-top:20px;padding-top:14px}
 .mcpskins-settings-reset button {color:#e05a5a}
+.mcpskins-export {font-size:13px;max-height:76vh;overflow:auto}
+.mcpskins-export p {color:var(--color-subtle_text);line-height:1.5}
+.mcpskins-export input:not([type=checkbox]) {box-sizing:border-box;min-height:30px;width:100%;padding:5px 8px;background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px}
+.mcpskins-export-name {display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;margin:12px 0}
+.mcpskins-export-name label {display:flex;flex-direction:column;gap:5px}
+.mcpskins-export-toolbar,.mcpskins-export-actions {display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}
+.mcpskins-export-toolbar strong {flex:1}
+.mcpskins-export-selection {display:grid;grid-template-columns:minmax(180px,1fr) minmax(280px,2fr);gap:18px}
+.mcpskins-export-selection aside {max-height:340px;overflow:auto;border-right:1px solid var(--color-border);padding-right:12px}
+.mcpskins-export-selection h3 {font-size:14px;font-weight:700;margin:12px 0 8px}
+.mcpskins-export-selection label {display:flex;align-items:center;gap:7px;padding:6px 0;overflow-wrap:anywhere}
+.mcpskins-export input[type=checkbox] {position:static;flex:0 0 24px;width:24px;height:24px;min-width:24px;margin:0;padding:0;transform:none;border:0;background:transparent}
+.mcpskins-export-skins {max-height:300px;overflow:auto;margin-top:8px}
+.mcpskins-export-skins label {border-bottom:1px solid var(--color-border)}
+.mcpskins-export-skins small {display:block;color:var(--color-subtle_text);font-size:11px;margin-top:3px}
+.mcpskins-export-actions {justify-content:flex-end}
+.mcpskins-export-note {font-size:11px}
+.mcpskins-export-separator {border:0;border-top:1px solid var(--color-border);margin:14px 0 10px}
+.mcpskins-export-flag {font-size:16px}
+.mcpskins-custom-status {--mc-muted:var(--color-subtle_text);--mc-text:var(--color-text)}
+.mcpskins-custom-status label {display:flex;flex-direction:column;gap:7px;margin:12px 0}
+.mcpskins-custom-status input:not([type=color]) {width:100%;min-height:30px;padding:5px 8px;background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px}
+.mcpskins-custom-status input[type=color] {width:42px;height:32px;padding:0;border:0}
 .mcpskins-help-links {display:flex;justify-content:center;gap:14px;padding:8px 0 14px}
 .mcpskins-help .mcpskins-help-links button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 72px;width:72px;min-width:72px;max-width:72px;height:72px;min-height:72px;padding:8px;margin:0;border-radius:6px}
 .mcpskins-help-links img {display:block;width:100%;height:100%;object-fit:contain}
@@ -200,6 +223,14 @@ module.exports = `
 .mcpskins-level-goals input {width:100%;min-width:0}
 .mcpskins-weapon-field {display:flex;flex-direction:column;gap:4px}
 .mcpskins-weapon-picker {position:relative;min-width:0}
+.mcpskins-collection-picker {position:relative;min-width:0}
+.mcpskins .mcpskins-collection-trigger {display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0;min-height:30px;background:var(--mc-field);color:var(--mc-text);text-align:left}
+.mcpskins-collection-trigger span:first-child {overflow:hidden;text-overflow:ellipsis}
+.mcpskins-collection-menu {position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:30;background:var(--mc-panel);border:1px solid var(--mc-border);border-radius:4px;box-shadow:0 4px 12px #0005;padding:4px}
+.mcpskins-collection-menu [role=listbox] {max-height:210px;overflow-x:hidden;overflow-y:auto}
+.mcpskins .mcpskins-collection-menu button {display:block;width:100%;min-width:0;text-align:left;white-space:normal;overflow-wrap:anywhere;border:0;background:transparent;box-shadow:none;padding:7px 9px}
+.mcpskins .mcpskins-collection-menu button:hover,.mcpskins .mcpskins-collection-menu button[aria-selected=true] {background:var(--mc-selected)}
+.mcpskins .mcpskins-collection-menu .mcpskins-new-collection {border-top:1px solid var(--mc-border);margin-top:4px;color:var(--mc-accent)}
 .mcpskins-weapon-input {display:flex;gap:4px;align-items:stretch}
 .mcpskins-weapon-input input {width:100%;min-width:0;flex:1}
 .mcpskins .mcpskins-weapon-toggle {flex:0 0 32px;width:32px;min-width:32px;padding:0}
@@ -215,7 +246,13 @@ module.exports = `
 .mcpskins-title {display:block;overflow-wrap:anywhere}
 .mcpskins-color,.mcpskins-save,.mcpskins-asset-actions {display:flex;gap:6px;flex-wrap:wrap}
 .mcpskins-animation-action {margin-top:12px}
-.mcpskins-model-mode {margin-top:10px;display:flex;flex-direction:column;align-items:flex-start;gap:5px}
+.mcpskins-model-mode {margin-top:10px;padding-top:10px;border-top:1px solid var(--mc-border);display:flex;flex-direction:column;align-items:flex-start;gap:5px}
+.mcpskins-lod {border-top:1px solid var(--mc-border);margin-top:12px;padding-top:10px}
+.mcpskins-lod h4 {font-weight:700;margin-bottom:8px}
+.mcpskins-lod-file {display:flex;align-items:flex-start;gap:8px;margin:8px 0}
+.mcpskins-lod-file small {display:block;font-size:11px;overflow-wrap:anywhere;margin-top:3px}
+.mcpskins-lod-status {display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;font-weight:700;font-size:17px}
+.mcpskins-lod-valid {color:#43B873}.mcpskins-lod-invalid {color:#E9B949}.mcpskins-lod-missing {color:#E05A5A}
 .mcpskins-color input {width:100px;flex:1;min-width:80px}
 .mcpskins-color .mcpskins-swatch {width:30px;min-width:30px}
 .mcpskins-previews {margin-top:12px;min-width:0}

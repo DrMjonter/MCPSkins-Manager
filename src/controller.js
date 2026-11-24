@@ -7,9 +7,15 @@ const {animationComponent} = require('./ui/animation');
 const {NativeAnimations,saveNativeMetadata} = require('./integration/native-animation');
 const {UpdateChecker} = require('./integration/updates');
 const {PackPaths, packDirectorySelection} = require('./domain/paths');
-const {clone, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames, isObject} = require('./domain/skin');
+const {clone, equalJSON, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames, isObject} = require('./domain/skin');
+const {exportInventory,runtimePlan,validateFilename} = require('./assets/pack-export');
+const {ExportSelection} = require('./state/export');
+const {exportComponent} = require('./ui/export');
+const {createZip} = require('./integration/zip');
+const {lodStatus,planLOD,writeLOD} = require('./assets/lod');
 const {THEMES} = require('./domain/constants');
 const {RegistryRepository} = require('./storage/registry');
+const {deleteSkin:removeSkin} = require('./storage/delete-skin');
 const {RarityRepository} = require('./storage/rarity-editor');
 const {RarityEditor} = require('./state/rarities');
 const {rarityComponent} = require('./ui/rarities');
@@ -19,11 +25,12 @@ const {collectionComponent} = require('./ui/collections');
 const {settingsComponent} = require('./ui/settings');
 const {SETTINGS, settingsFrom} = require('./domain/preferences');
 const {loadPackSettings, savePackSettings} = require('./storage/settings');
-const {loadPackMetadata, savePackMetadata} = require('./storage/pack-metadata');
+const {loadPackMetadata, savePackMetadata,metadataFile} = require('./storage/pack-metadata');
 const {newPackPaths, createPack} = require('./storage/new-pack');
 const {RECENT_PACKS, recentPacks, rememberPack} = require('./storage/recent-packs');
 const {atomicJSON, isDirectory} = require('./storage/files');
-const {STATUSES, saveStatuses} = require('./domain/status');
+const {availableStatuses, sortedStatuses, newCustomStatus, saveStatuses} = require('./domain/status');
+const {customStatusComponent} = require('./ui/custom-status');
 const {checkPack} = require('./assets/health');
 const {healthSnapshot, healthSummary, healthIssueKey, applyHealthIgnores} = require('./assets/health-monitor');
 const {shortcutComponent} = require('./ui/keyboard');
@@ -79,7 +86,7 @@ class Controller {
     start() {
         this.checkForUpdates();
         if (!this.healthPoll) {
-            this.healthPoll = setInterval(() => { this.updateHealth(); this.animations.forEach(session => session.poll()); this.nativeAnimations.poll(); }, 3000);
+            this.healthPoll = setInterval(() => { this.updateHealth(); this.updateLODStatus(); this.animations.forEach(session => session.poll()); this.nativeAnimations.poll(); }, 3000);
             if (this.healthPoll && typeof this.healthPoll.unref === 'function') this.healthPoll.unref();
         }
         this.manager.state.weaponNames = sanitizeWeaponNames(this.getStored(WEAPON_NAMES));
@@ -123,11 +130,19 @@ class Controller {
         try {
             this.manager.state.packMetadata = loadPackMetadata(repository.fs, repository.paths);
             repository.paths.modelReferences = this.manager.state.packMetadata.weapon_models || {};
+            repository.paths.lodReferences = this.manager.state.packMetadata.weapon_lod_models || {};
         }
         catch (error) {
             this.manager.state.packMetadata = {title: 'Pack Name'};
             this.manager.state.notice = `Pack metadata unavailable: ${error.message}`;
         }
+        this.refreshCollectionOptions();
+    }
+    refreshCollectionOptions() {
+        if(this.disposed || !this.manager.repository) return;
+        const repository=this.manager.repository;
+        const scan=new CollectionRepository(repository.fs,repository.paths).scan();
+        this.manager.state.collectionOptions=scan.rows.filter(row=>row.key!=='*').map(row=>row.name);
     }
     updatePackMetadata(changes, expectedPack) {
         if (!this.manager.state.ready || this.disposed) return Promise.resolve(false);
@@ -260,29 +275,82 @@ class Controller {
             this.dialogs.add(dialog); dialog.show(); return dialog;
         });
     }
-    openCollections() {
+    openCollections(createNew = false) {
         if (!this.manager.state.ready || this.disposed) return;
         if (this.collectionEditor) {
             const existing = [...this.dialogs].find(dialog => dialog.id === 'mcpskins_collections');
-            if (existing) { existing.show(); return existing; }
+            if (existing) { existing.show(); if(createNew)this.collectionEditor.create(); return existing; }
         }
-        return this.runTransition(() => {
+        const open=() => {
             this.removeDialog('mcpskins_collections');
             const repository = this.manager.repository;
+            const originalDraft=this.manager.state.draft;
             const editor = new CollectionEditor(new CollectionRepository(repository.fs, repository.paths), this.manager.state.rarities,
                 () => confirmUnsaved({title:'Unsaved collection edits', message:'Save your collection changes before continuing?'}),
                 result => {
                     if (result.renamed) this.manager.state.collectionFilter = '';
-                    this.manager.reload(); this.remember(); this.updatePreviews(); this.updateHealth(true);
-                }, () => !this.disposed && this.manager.repository === repository && !this.manager.state.dirty);
+                    if(createNew && result.created && this.manager.state.draft===originalDraft && this.manager.state.active) this.edit('collection',editor.state.draft.collection);
+                    if(!this.manager.state.dirty)this.manager.reload();
+                    this.refreshCollectionOptions();this.remember();this.updatePreviews();this.updateHealth(true);
+                }, () => !this.disposed && this.manager.repository === repository && (createNew || !this.manager.state.dirty),
+                () => !this.manager.state.dirty);
             this.collectionEditor = editor;
+            if(createNew)editor.create();
             const close = () => {
                 editor.guard(() => { dialog.hide(); if (this.collectionEditor === editor) this.collectionEditor = null; });
                 return false;
             };
-            const dialog = new Dialog('mcpskins_collections', {title:'Pack Collections', width:1040, buttons:['Close'], confirmIndex:0, cancelIndex:0,
+            const dialog = new Dialog('mcpskins_collections', {title:'Collections Manager', width:1040, buttons:['Close'], confirmIndex:0, cancelIndex:0,
                 component:collectionComponent(editor), onConfirm:close, onCancel:close});
             this.dialogs.add(dialog); dialog.show(); return dialog;
+        };
+        return createNew?this.run(open):this.runTransition(open);
+    }
+    openExport() {
+        if(!this.manager.state.ready || this.disposed)return;
+        return this.runTransition(()=>{
+            if(this.cancelPackExport)this.cancelPackExport();
+            this.removeDialog('mcpskins_export');
+            const repository=this.manager.repository,metadata=loadPackMetadata(repository.fs,repository.paths);
+            const inventory=exportInventory(repository.fs,repository.paths,metadata,this.manager.state.settings.customStatuses);
+            const selection=new ExportSelection(inventory,metadata),state=selection.state;
+            let canceled=false;
+            const cancel=()=>{canceled=true;};this.cancelPackExport=cancel;
+            const exportPack=async full=>{
+                if(state.busy || canceled)return;
+                Object.assign(state,{busy:true,error:'',notice:'',progress:'Preparing export...'});
+                try {
+                    const filename=validateFilename(state.filename);
+                    if(!state.version.trim())throw new Error('Enter a pack version for the export.');
+                    const current=exportInventory(repository.fs,repository.paths,metadata,this.manager.state.settings.customStatuses);
+                    if(!full) {
+                        const byKey=new Map(inventory.rows.map(row=>[row.key,row]));
+                        for(const key of state.selected) {
+                            const before=byKey.get(key),after=current.rows.find(row=>row.key===key);
+                            if(!before || !after || !equalJSON(before.data,after.data))throw new Error('Skin registries changed. Reopen Export Pack before exporting.');
+                        }
+                    }
+                    const plan=full?{entries:[...current.files.values()],skins:current.rows.length,omitted:0}:runtimePlan(current,state.selected);
+                    const zip=await createZip(plan.entries,this.desktop.require('zlib').deflateRawSync,
+                        (count,total)=>{state.progress='Packing '+count+' of '+total+' files...';},
+                        ()=>canceled || this.disposed || this.manager.repository!==repository);
+                    if(canceled || this.disposed || this.manager.repository!==repository)return;
+                    const outputDirectory=repository.paths.inside('Packed');
+                    if(this.desktop.path.relative(repository.paths.pack,outputDirectory)==='')throw new Error('The export folder must be beside the pack. Choose a pack folder other than Packed.');
+                    repository.fs.mkdirSync(outputDirectory,{recursive:true});
+                    let saved=false;
+                    Blockbench.export({type:'MCPSkins pack',extensions:['zip'],name:filename,startpath:this.desktop.path.join(outputDirectory,filename),savetype:'buffer',content:zip.buffer.slice(zip.byteOffset,zip.byteOffset+zip.byteLength),resource_id:'mcpskins_pack_export'},()=>{
+                        saved=true;
+                        state.notice='Exported '+plan.skins+' skin(s) in '+plan.entries.length+' files'+(full?'.':' ('+plan.omitted+' files omitted).');
+                        Blockbench.showQuickMessage('Pack exported',3500);
+                    });
+                    if(!saved)state.notice='Export canceled.';
+                } catch(error) {state.error=error.message;}
+                finally {state.busy=false;state.progress='';}
+            };
+            const close=()=>{cancel();dialog.hide();return false;};
+            const dialog=new Dialog('mcpskins_export',{title:'Export Pack',width:1000,buttons:[],component:exportComponent(selection,exportPack),onConfirm:close,onCancel:close});
+            this.dialogs.add(dialog);dialog.show();return dialog;
         });
     }
     async resolveGunPack(draft) {
@@ -556,10 +624,62 @@ class Controller {
         }
     }
     schedulePreviews() { clearTimeout(this.timer); this.timer = setTimeout(() => this.updatePreviews(), 160); }
+    updateLODStatus() {
+        const state=this.manager.state;
+        if(!state.ready || this.disposed)return;
+        state.lodFiles=[];
+        if(this.manager.selection.length>1 || this.manager.duplicateSource)return;
+        try {state.lodFiles=lodStatus(this.manager.repository.fs,this.manager.repository.paths,state.draft);}
+        catch(error){state.lodFiles=[{kind:'model',label:'LOD Model',path:'',filename:'',status:'invalid',message:error.message}];}
+    }
+    generateLOD() {
+        const state=this.manager.state;
+        if(!state.ready || state.draft.kind!=='gun' || this.manager.selection.length>1 || this.manager.duplicateSource)return;
+        return this.run(async()=>{
+            if(!state.selectedKey || state.dirty)throw new Error('Save the skin entry before generating LODs.');
+            const repository=this.manager.repository,draft=state.draft;
+            let source=null;
+            try{source=await this.resolveGunPack(draft);}catch(error){if(!repository.paths.lodReferences[modelKey(draft.weapon,draft.kind)] && !draft.weapon.startsWith('tacz:'))throw error;}
+            if(source===false || this.disposed || this.manager.repository!==repository || state.draft!==draft || state.dirty)return;
+            let plan=planLOD(repository.fs,repository.paths,draft,source);
+            const guard=plan=>{
+                const same=(file,list)=>file && list.some(candidate=>this.bridge.same(file,candidate));
+                if(typeof ModelProject!=='undefined')for(const project of ModelProject.all) {
+                    const outputs=plan.files.map(([file])=>file);
+                    if(same(project.export_path,outputs) || same(project.save_path,outputs) || (project.textures || []).some(texture=>same(texture.path,outputs)))throw new Error('Save and close open LOD model or texture projects before generating LODs.');
+                    if(project.saved===false && (same(project.export_path,plan.sources) || same(project.save_path,plan.sources)) || (project.textures || []).some(texture=>texture.saved===false && same(texture.path,plan.sources)))throw new Error('Save the full model and painted textures in Blockbench before generating LODs.');
+                }
+                for(const session of this.animations.values())if((session.running || session.state.busy || session.state.dirty) && same(session.texture,[...plan.sources,...plan.files.map(([file])=>file)]))throw new Error('Save or discard pending animation edits before generating LODs.');
+            };
+            guard(plan);
+            if(plan.existing.length) {
+                const replace=await new Promise(resolve=>Blockbench.showMessageBox({title:'Generate LODs',message:'Replace existing LOD files with copies of this skin\'s full model and textures?',buttons:['Replace','Cancel'],confirm:1,cancel:1},resolve));
+                if(replace!==0 || this.disposed || this.manager.repository!==repository || state.draft!==draft || state.dirty)return;
+                plan=planLOD(repository.fs,repository.paths,draft,source);guard(plan);
+            }
+            const metadata=loadPackMetadata(repository.fs,repository.paths);
+            if(metadata.weapon_lod_models!==undefined && !isObject(metadata.weapon_lod_models))throw new Error('Pack weapon_lod_models must be a JSON object.');
+            const lodReferences={...metadata.weapon_lod_models,[modelKey(draft.weapon,draft.kind)]:plan.reference};
+            const updated={...metadata,weapon_lod_models:lodReferences};
+            if(source) {
+                if(metadata.weapon_models!==undefined && !isObject(metadata.weapon_models))throw new Error('Pack weapon_models must be a JSON object.');
+                updated.weapon_models={...metadata.weapon_models,[modelKey(draft.weapon,draft.kind)]:source.modelRef};
+            }
+            writeLOD(repository.fs,repository.paths,[...plan.files,[metadataFile(repository.paths),JSON.stringify(updated,null,2)+'\n']]);
+            state.packMetadata=updated;repository.paths.lodReferences=lodReferences;
+            if(updated.weapon_models)repository.paths.modelReferences=updated.weapon_models;
+            const targets=plan.files.map(([file])=>file),matches=filename=>targets.some(file=>this.bridge.same(filename,file));
+            for(const [filename,session] of this.animations)if(matches(filename)){session.dispose();this.animations.delete(filename);}
+            for(const record of this.nativeAnimations.records)if(matches(record.texture.path))this.nativeAnimations.records.delete(record);
+            state.notice='LOD model and textures generated from the saved full model and painted textures. UVs are preserved; geometry was not simplified.';
+            this.updateLODStatus();this.updateHealth(true);Blockbench.showQuickMessage('LODs generated',3000);
+        });
+    }
     updatePreviews() {
         clearTimeout(this.timer);
         if (!this.manager.state.ready || this.disposed) return;
         this.scheduleHealth();
+        this.updateLODStatus();
         this.manager.state.customModel = false;
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) { this.manager.state.previews = []; return; }
         try {
@@ -646,10 +766,13 @@ class Controller {
                         try {
                             const metadata = loadPackMetadata(repository.fs, repository.paths);
                             if (metadata.weapon_models !== undefined && !isObject(metadata.weapon_models)) throw new Error('Pack weapon_models must be a JSON object.');
+                            if (metadata.weapon_lod_models !== undefined && !isObject(metadata.weapon_lod_models)) throw new Error('Pack weapon_lod_models must be a JSON object.');
                             const references = {...metadata.weapon_models, [modelKey(draft.weapon, draft.kind)]: source.modelRef};
-                            this.manager.state.packMetadata = metadata.weapon_models && metadata.weapon_models[modelKey(draft.weapon, draft.kind)] === source.modelRef
-                                ? metadata : savePackMetadata(repository.fs, repository.paths, {weapon_models: references});
+                            const lodReferences={...metadata.weapon_lod_models,[modelKey(draft.weapon,draft.kind)]:source.lodModelRef || null};
+                            this.manager.state.packMetadata = metadata.weapon_models && metadata.weapon_models[modelKey(draft.weapon, draft.kind)] === source.modelRef && metadata.weapon_lod_models && metadata.weapon_lod_models[modelKey(draft.weapon,draft.kind)]===(source.lodModelRef || null)
+                                ? metadata : savePackMetadata(repository.fs, repository.paths, {weapon_models: references,weapon_lod_models:lodReferences});
                             repository.paths.modelReferences = references;
+                            repository.paths.lodReferences = lodReferences;
                         } catch (error) { for (const filename of files.created) repository.fs.unlinkSync(filename); throw error; }
                     }
                     if (source && source.editorOnly) this.manager.state.notice = 'LesRaisins geometry is an editing reference. MCPSkins applies texture and icon changes to these items.';
@@ -795,9 +918,30 @@ class Controller {
         return this.run(() => {
             const repository = this.manager.repository;
             const rows = this.manager.state.selectedKeys.includes(row.key) ? this.manager.selection : [row];
-            this.manager.state.packMetadata = saveStatuses(repository.fs, repository.paths, rows, status);
-            Blockbench.showQuickMessage(`${rows.length} skin${rows.length === 1 ? '' : 's'}: ${status === null ? 'status cleared' : STATUSES[status].label}`, 2500);
+            const custom=this.manager.state.settings.customStatuses;
+            this.manager.state.packMetadata = saveStatuses(repository.fs, repository.paths, rows, status,custom);
+            if(this.manager.state.settings.health.live)this.updateHealth(true);
+            Blockbench.showQuickMessage(`${rows.length} skin${rows.length === 1 ? '' : 's'}: ${status === null ? 'Unassigned' : availableStatuses(custom)[status].label}`, 2500);
         });
+    }
+    createCustomStatus() {
+        if(this.disposed) return;
+        this.removeDialog('mcpskins_custom_status');
+        const state={name:'',order:'15',color:'#6DA9E4',error:''};
+        const dialog=new Dialog('mcpskins_custom_status',{title:'Custom Status',width:440,buttons:['Cancel','Done'],confirmIndex:1,cancelIndex:0,
+            component:customStatusComponent(state),onConfirm:()=>{
+                try {
+                    if(this.disposed) return false;
+                    const current=this.manager.state.settings;
+                    const status=newCustomStatus(state,current.customStatuses);
+                    const settings=settingsFrom({...current,customStatuses:[...current.customStatuses,status]});
+                    this.storage.setItem(SETTINGS,JSON.stringify(settings));
+                    this.manager.state.settings=settings;
+                    Blockbench.showQuickMessage('Custom status added',2500);
+                    dialog.hide();
+                } catch(error) {state.error=error.message;return false;}
+            }});
+        this.dialogs.add(dialog);dialog.show();return dialog;
     }
     scheduleHealth() {
         clearTimeout(this.healthTimer);
@@ -812,9 +956,9 @@ class Controller {
         const repository = this.manager.repository;
         let stamp, report;
         try {
-            stamp = healthSnapshot(repository.fs, repository.paths);
+            stamp = healthSnapshot(repository.fs, repository.paths)+JSON.stringify([this.manager.state.settings.health,this.manager.state.settings.customStatuses]);
             if (!force && this.healthRepository === repository && this.healthStamp === stamp && this.healthReport) return this.healthReport;
-            report = checkPack(repository.fs, repository.paths, this.manager.state.settings.health);
+            report = checkPack(repository.fs, repository.paths, {...this.manager.state.settings.health,customStatuses:this.manager.state.settings.customStatuses});
             let metadata = {};
             try { metadata = loadPackMetadata(repository.fs, repository.paths); } catch { /* The report already includes the metadata error. */ }
             applyHealthIgnores(report, repository.paths, metadata);
@@ -867,16 +1011,42 @@ class Controller {
             return report;
         });
     }
+    deleteSkin(row) {
+        const repository=this.manager.repository;
+        return this.runTransition(async () => {
+            const target=this.freshRows([row])[0];
+            const choice=await new Promise(resolve=>Blockbench.showMessageBox({title:'Delete Skin',
+                message:'Delete "'+String(target.skin.name || target.skin.id)+'"?\n\nFull Delete removes all related files, including textures and icons.\n\nDelete Entry only removes skin registry entry.',
+                buttons:['Full Delete','Delete Entry','Cancel'],confirm:2,cancel:2},resolve));
+            if (choice!==0 && choice!==1 || this.disposed || this.manager.repository!==repository) return;
+            const result=removeSkin(repository,target,choice===0,assets=>{
+                const matches=filename=>filename && assets.related.some(file=>this.bridge.same(filename,file));
+                if(typeof ModelProject!=='undefined' && ModelProject.all.some(project=>matches(project.export_path) || matches(project.save_path) || (project.textures || []).some(texture=>matches(texture.path)))) {
+                    throw new Error('Save and close the skin\'s open model and texture projects before Full Delete. Delete Entry keeps those files.');
+                }
+                for(const session of this.animations.values()) if(matches(session.texture) && !session.disposed && (session.running || session.state.busy || session.state.dirty)) throw new Error('Save or discard this skin\'s pending animation edits before Full Delete.');
+            });
+            if(result.full) {
+                const matches=filename=>filename && result.related.some(file=>this.bridge.same(filename,file));
+                for(const [filename,session] of this.animations) if(matches(filename)) {session.dispose();this.animations.delete(filename);}
+                for(const record of this.nativeAnimations.records) if(matches(record.texture.path)) this.nativeAnimations.records.delete(record);
+            }
+            this.manager.reload();this.loadMetadata();this.remember();this.updatePreviews();this.updateHealth(true);
+            this.manager.state.notice=result.warning || 'Skin deleted'+(result.full?' with its related files.':'. Asset files were kept.');
+            Blockbench.showQuickMessage(result.full?'Skin and related files deleted':'Skin entry deleted',3500);
+        });
+    }
     context(row, event) {
-        new Menu([{name: 'Status', icon: 'flag', children: [
-                ...Object.entries(STATUSES).map(([status, info]) => ({name: info.label, icon: 'flag', color: info.color, click: () => this.setStatus(row, status)})),
-                {name: 'Clear Status', icon: 'flag', click: () => this.setStatus(row, null)}
-            ]}, {name: 'Duplicate Skin', icon: 'content_copy', click: () => this.duplicateSkin(row)},
+        new Menu([{name: 'Duplicate Skin', icon: 'content_copy', click: () => this.duplicateSkin(row)},
+            {name: 'Status', icon: 'flag', children: [
+                ...sortedStatuses(this.manager.state.settings.customStatuses).map(info => ({name:info.label,icon:'flag',color:info.color,click:()=>this.setStatus(row,info.id)})),
+                {name:'Custom Status',icon:'add',click:()=>this.createCustomStatus()}
+            ]},
             {name: 'Open File', icon: 'description', click: () => this.run(() => this.desktop.open(row.filename))},
-            {name: 'Reveal File', icon: 'folder_open', click: () => {
+            {name: 'Reveal in File Explorer', icon: 'folder_open', click: () => {
                 if (typeof Blockbench.showItemInFolder === 'function') Blockbench.showItemInFolder(row.filename);
                 else this.run(() => this.desktop.open(this.desktop.path.dirname(row.filename), true));
-            }}]).open(event);
+            }}, {name:'Delete Skin',icon:'delete',click:()=>this.deleteSkin(row)}]).open(event);
     }
     changeTheme(theme) {
         if (theme !== 'Blockbench' && !Object.hasOwn(THEMES, theme)) return;

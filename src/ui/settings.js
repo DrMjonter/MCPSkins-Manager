@@ -40,6 +40,7 @@ function settingsComponent(state, change, open, reset, close) {
                     <section v-show="tab==='debug'" id="mcpskins-settings-panel-debug" role="tabpanel" aria-labelledby="mcpskins-settings-tab-debug">
                         <h3>Health Check</h3>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.live" @change="edit('health','live',$event)">Check saved files automatically</label><p>When disabled, click the health icon to run a check manually.</p>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.skipLowOrder" @change="edit('health','skipLowOrder',$event)">Skip skins with status order 5 or lower</label><p>Skips Planned, Unassigned, and custom statuses at 5 or below. Pack-wide registry and definition checks still run.</p>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingHud" @change="edit('health','missingHud',$event)">Warn about missing HUD textures</label>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingIcon" @change="edit('health','missingIcon',$event)">Warn about missing icon textures</label>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingMaps" @change="edit('health','missingMaps',$event)">Warn about missing normal/specular maps when defaults exist</label>

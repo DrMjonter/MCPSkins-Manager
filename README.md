@@ -1,4 +1,4 @@
-# MCPSkins Manager v1.2.1
+# MCPSkins Manager v1.2.2
 
 A Blockbench plugin for creating and managing MCPSkins packs. Made to make skin creation a less tedious and annoying process, with less digging through folders and editing JSON by hand.
 
@@ -25,9 +25,9 @@ Select a skin from the list to edit it, or click **New Skin** to start one. The 
 - Edit names, descriptions, collections, authors, subtitles, rarity colors, NEW and LIMITED badges, and unlock settings.
 - Group skins as **variants**, then add level rewards with kill, headshot, or player-kill goals.
 
-Drag the handle below the skin list to change its height. The manager remembers the size and keeps it within the available space. Double-click the handle to reset it.
-
 Right-click a skin and choose **Duplicate Skin** to make a copy. Adjust the suggested name and ID, then save it to copy the entry and its existing assets. Save any painting in Blockbench first so those changes are included.
+
+Right-click a skin and choose **Delete Skin** to remove it. **Delete Entry** keeps its asset files; **Full Delete** also removes its related textures, icons, geometry, and animation files. Save and close any projects using those files before Full Delete. Variant links and level rewards pointing to the deleted skin are cleared; deleting a parent keeps its variants as separate skins.
 
 For bulk edits, **Ctrl/Cmd-click** individual skins or **Shift-click** a range. Identity fields are disabled while editing multiple skins, and only the shared fields you change are applied.
 
@@ -42,6 +42,14 @@ If files are missing, the manager prepares skin-specific copies from the source 
 The manager looks for TaCZ gun packs in the instance's `tacz` folder and installed LesRaisins JARs in `mods`. Use **Gun Packs...** to change the TaCZ directory or run a rescan. The results show counts for guns, attachments, melee weapons, throwables, consumables, and custom rarities.
 
 **Open Folder** takes you to the item's skin assets and creates the folder if it doesn't exist. The circular-arrow button beside search refreshes the skin list.
+
+## LOD models and textures
+
+The gun inspector lists **LOD Texture** and **LOD Model** with a green check for valid files, a yellow exclamation for invalid files, and a red X for missing files. Hover the indicator for details.
+
+Save the full model and painted textures, then click **Generate LODs**. The manager copies the full model, texture, and available normal/specular maps to the weapon's LOD paths. For example, `uzi_copper_s.png` becomes `uzi_copper_lod_s.png`, and the model is named `uzi__skin_uzi_copper.json`. Existing LOD files require confirmation before replacement.
+
+The generator keeps the full model's geometry and UVs; it does not simplify the mesh. It uses the source gun pack's LOD reference when available. The weapon must have LOD support for the files to be used in game.
 
 ## Animated textures
 
@@ -59,11 +67,13 @@ Click **Rarities** to browse or create rarity tiers. You can edit their names, c
 
 Editing a built-in tier saves an override inside your pack. Custom tiers are picked up by both rarity dropdowns, and the list changes when you switch packs.
 
-## Collection Cases
+## Collections Manager
 
-If you use Collection Cases, click **Collection Cases** beside Rarities. The manager finds collections in your pack and lets you set their shop titles, descriptions, prices, case colors, and icon texture IDs.
+If you use Collection Cases, click **Collections Manager** beside Rarities. The manager finds collections in your pack and lets you set their shop titles, descriptions, prices, case colors, and icon texture IDs.
 
 Under **Advanced**, set key requirements, rarity weights, and excluded skins. Blank fields inherit **Global Defaults**, then the addon's defaults. A price of **0** disables purchasing. Global Defaults apply across all loaded packs. Exclusions from Global Defaults also apply to individual collections; edit the defaults to remove those exclusions.
+
+The Collection field in the Asset Inspector lists collections found in the pack. Choose **+ New Collection** at the bottom to open a new collection draft. Saving it selects the new collection on your skin without losing your other edits.
 
 The odds preview shows rarity and individual skin chances using saved skins from this pack, including skin weights, rarity weights, and exclusions. Other installed packs can change those odds. Renaming a collection updates its matching skin entries throughout this pack too.
 
@@ -73,7 +83,7 @@ Settings are saved in `data/<namespace>/collection_cases/*.json`; use `/reload` 
 
 Click the pack name beside **Select Pack** to rename it. The Select Pack window also keeps a list of recent packs so you don't have to browse to the same folder every time.
 
-Right-click an entry and use **Status** to mark it **Planned** (red), **WIP** (yellow), or **Complete** (green). You can apply a status to multiple selected skins and sort by the Progress column.
+Right-click an entry and use **Status** to mark it **Planned** (red), **WIP** (yellow), or **Complete** (green). Choose **Unassigned** to clear a status, or **Custom Status** to save your own name, flag color, and sort order. Custom statuses are available across packs. You can apply a status to multiple selected skins and sort by the Progress column; both the menu and Progress sorting use the status sort order.
 
 The small health button beside the pack name checks saved files automatically:
 
@@ -81,7 +91,18 @@ The small health button beside the pack name checks saved files automatically:
 - **Yellow:** warnings only.
 - **Green:** no active issues.
 
+Skins with status order 5 or lower, including Planned and Unassigned, are skipped by default. You can change this in **Settings > Debug**.
+
 Click it to open the report. It checks saved registries, textures, geometry when present, animation metadata, and Collection Cases definitions. Missing optional geometry is fine, and HUD or icon aspect ratios do not produce warnings. Missing optional HUD or icon files can still appear as warnings. Individual findings can be ignored, then restored later under **Ignored findings**. Pack titles, authors, progress flags, and ignored findings are stored in `mcpskins_manager.json` inside the pack.
+
+## Exporting packs
+
+Click **Export...** to make a ZIP. Use the collection and status checkboxes to include or exclude groups, then adjust individual skins in the list. Mixed checkboxes mean only some skins in that group are selected.
+
+- **Export Pack:** Includes only the selected skins and runtime files, including Collection Cases metadata and referenced resources. Leaves out editing models, `.bbmodel` files, animation working folders, and unused images.
+- **Export Full:** Includes the entire pack, all skins, and project files, regardless of the selection.
+
+The ZIP name starts as `<PackName>_<Author>_<version>.zip`. Set the pack version or type your own filename, then choose where to save it. The save dialog starts in `mcpskins/Packed`, beside your pack folder; the manager creates it if needed. Save textures and models in Blockbench first; export uses saved files and leaves the source pack alone. Links to excluded variants are removed from the exported copy.
 
 ## Settings
 

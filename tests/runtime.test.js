@@ -133,6 +133,8 @@ function setup(t) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpskins-runtime-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
     const local = storage();
+    // Existing health fixtures deliberately check every skin, independent of progress.
+    local.setItem('mcpskins_asset_manager.settings.v1', JSON.stringify({health:{skipLowOrder:false}}));
     local.setItem('mcpskins_asset_manager.preferences.v1', JSON.stringify({root, theme: 'Blockbench'}));
     const requests = [];
     const nativeRequire = (name, options) => { requests.push({name, options}); return name === 'fs' ? fs : require(name); };
@@ -955,7 +957,7 @@ test('bulk editor renders disabled identity controls and mixed values using inst
         assert.equal(control.data.attrs.disabled, true, label);
     }
     assert.ok(nodes.some(node => node.tag === 'input' && node.data.domProps && node.data.domProps.indeterminate));
-    assert.ok(nodes.some(node => node.tag === 'input' && node.data.attrs.placeholder === 'Mixed values'));
+    assert.ok(nodes.some(node => node.componentOptions?.tag === 'collection-picker' && node.componentOptions.propsData.mixed));
     assert.ok(nodes.some(node => node.tag === 'button' && text(node) === 'Save Selected Skins'));
     assert.ok(!nodes.some(node => node.tag === 'button' && text(node) === 'Open Model'));
     manager.select(rows[0]);
@@ -1193,7 +1195,7 @@ test('Status hover menu saves color flags for selected skins and preserves skin 
     controller.edit('description', 'Keep this draft');
     controller.context(rows[0], {});
     const status = items.find(item => item.name === 'Status');
-    assert.deepEqual(status.children.slice(0, 3).map(item => item.name), ['WIP', 'Planned', 'Complete']);
+    assert.deepEqual(status.children.map(item => item.name), ['Unassigned', 'Planned', 'WIP', 'Complete', 'Custom Status']);
     await status.children.find(item => item.name === 'WIP').click();
     for (const row of rows.slice(0, 2)) assert.equal(rowStatus(manager.state.packMetadata, manager.repository.paths, row).color, '#E9B949');
     assert.equal(rowStatus(manager.state.packMetadata, manager.repository.paths, rows[2]), null);
@@ -1253,15 +1255,15 @@ test('health report and colored status flags render with installed Blockbench Vu
     panel.$destroy(); view.$destroy();
 });
 
-test('Progress sorting uses Planned, WIP, Complete, and unassigned and reverses on the next click', async t => {
+test('Progress sorting uses numeric orders Unassigned 0, Planned 5, WIP 10, Complete 20 and reverses on the next click', async t => {
     const {controller, manager, rows} = multipleSkins(t);
     await controller.setStatus(rows[0], 'complete');
     await controller.setStatus(rows[1], 'planned');
     await controller.setStatus(rows[2], 'wip');
     manager.sort('progress');
-    assert.deepEqual(manager.filteredRows().map(row => row.key), [rows[1].key, rows[2].key, rows[0].key, rows[3].key]);
+    assert.deepEqual(manager.filteredRows().map(row => row.key), [rows[3].key, rows[1].key, rows[2].key, rows[0].key]);
     manager.sort('progress');
-    assert.deepEqual(manager.filteredRows().map(row => row.key), [rows[3].key, rows[0].key, rows[2].key, rows[1].key]);
+    assert.deepEqual(manager.filteredRows().map(row => row.key), [rows[0].key, rows[2].key, rows[1].key, rows[3].key]);
 });
 
 test('start-screen access supports the Blockbench 5.1 global section helper', t => {
@@ -2170,7 +2172,7 @@ test('Collections menu renders in native Vue, edits metadata, renames skins and 
     t.after(()=>{Vue.config.warnHandler=oldWarn;Vue.config.errorHandler=oldError;});
     const panelDefinition=panelComponent(controller),panel=new Vue({...panelDefinition,...Vue.compile(panelDefinition.template)});
     const flatten=node=>[node,...(node.children||[]).flatMap(flatten)];
-    assert.ok(flatten(panel._render()).some(node=>node.tag==='button' && node.children?.some(child=>child.text==='Collection Cases')));
+    assert.ok(flatten(panel._render()).some(node=>node.tag==='button' && node.children?.some(child=>child.text==='Collections Manager')));
     assert.equal(await controller.openCollections(),true);
     const dialog=dialogs.at(-1),editor=controller.collectionEditor,component=dialog.options.component;
     const view=new Vue({...component,...Vue.compile(component.template)});
@@ -2382,4 +2384,214 @@ test('Assets settings persist and control Open Model map preparation without hid
     await controller.openModel();assert.equal(opened.normal,normal);
     const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();
     assert.equal(restarted.manager.state.settings.assets.createNormal,false);assert.equal(restarted.manager.state.settings.assets.createSpecular,false);
+});
+
+
+test('skin context menu uses the requested order and deletion confirmation supports Cancel and Delete Entry',async t=>{
+    const {controller,globals,asset,repository}=healthySavedPack(t);const row=controller.manager.state.rows[0];
+    const previous=global.Menu;let entries;global.Menu=class{constructor(items){entries=items;}open(){}};
+    t.after(()=>{if(previous===undefined)delete global.Menu;else global.Menu=previous;});
+    controller.context(row,{});assert.deepEqual(entries.map(item=>item.name),['Duplicate Skin','Status','Open File','Reveal in File Explorer','Delete Skin']);
+    let pending=entries[4].click();assert.deepEqual(globals.prompt.options.buttons,['Full Delete','Delete Entry','Cancel']);assert.equal(globals.prompt.options.cancel,2);
+    assert.ok(globals.prompt.options.message.includes('Full Delete removes all related files, including textures and icons.'));
+    assert.ok(globals.prompt.options.message.includes('Delete Entry only removes skin registry entry.'));
+    globals.prompt.callback(2);await pending;assert.equal(controller.manager.state.rows.length,1);assert.equal(fs.existsSync(asset('.png')),true);
+    pending=entries[4].click();globals.prompt.callback(1);await pending;
+    assert.equal(controller.manager.state.rows.length,0);assert.equal(fs.existsSync(asset('.png')),true);assert.deepEqual(JSON.parse(fs.readFileSync(row.filename,'utf8')).skins,[]);
+});
+
+test('Full Delete protects open projects and stops animation sessions from recreating deleted files',async t=>{
+    const {controller,globals,asset}=healthySavedPack(t);const row=controller.manager.state.rows[0];
+    ModelProject.all.push({export_path:asset('.json'),textures:[]});
+    let pending=controller.deleteSkin(row);globals.prompt.callback(0);await pending;
+    assert.match(globals.prompt.options.message,/Save and close/);assert.equal(fs.existsSync(asset('.png')),true);assert.equal(controller.manager.state.rows.length,1);
+    ModelProject.all.length=0;let disposed=false;const session={texture:asset('.png'),state:{dirty:false},dispose(){disposed=true;}};
+    controller.animations.set(asset('.png'),session);controller.nativeAnimations.records.add({texture:{path:asset('.png')}});
+    pending=controller.deleteSkin(row);globals.prompt.callback(0);await pending;
+    assert.equal(controller.manager.state.rows.length,0);assert.equal(fs.existsSync(asset('.png')),false);assert.equal(fs.existsSync(asset('_icon.png')),false);
+    assert.equal(disposed,true);assert.equal(controller.animations.size,0);assert.equal(controller.nativeAnimations.records.size,0);
+});
+
+test('Save and Continue deletes the saved renamed target, while canceling unsaved edits prevents the deletion prompt',async t=>{
+    const {controller,globals,asset}=healthySavedPack(t);const row=controller.manager.state.rows[0];controller.manager.select(row);
+    controller.edit('description','Keep this edit');let pending=controller.deleteSkin(row);assert.equal(globals.prompt.options.title,'Unsaved MCPSkins edits');
+    globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));await pending;assert.equal(controller.manager.state.dirty,true);assert.equal(controller.manager.state.rows.length,1);
+    controller.edit('id','ai_awp_renamed');pending=controller.deleteSkin(row);globals.prompt.callback(globals.prompt.options.buttons.indexOf('Save and Continue'));
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(globals.prompt.options.title,'Delete Skin');globals.prompt.callback(1);await pending;
+    assert.equal(controller.manager.state.rows.length,0);assert.equal(controller.manager.state.dirty,false);assert.equal(fs.existsSync(asset('.png')),true);
+});
+
+
+test('Custom Status dialog cancels safely, validates inputs, and persists statuses and colors across packs and reloads',async t=>{
+    const {controller,manager,rows,local,nativeRequire,root}=multipleSkins(t),dialogs=dialogEnvironment(t);
+    const {rowStatus}=require('../src/domain/status'),{RegistryRepository}=require('../src/storage/registry'),{PackPaths}=require('../src/domain/paths');
+    let dialog=controller.createCustomStatus();assert.deepEqual(dialog.options.buttons,['Cancel','Done']);assert.equal(dialog.options.confirmIndex,1);assert.equal(dialog.options.cancelIndex,0);
+    let form=dialog.options.component.data().status;form.name='Canceled';dialog.hide();assert.equal(manager.state.settings.customStatuses.length,0);
+    dialog=controller.createCustomStatus();form=dialog.options.component.data().status;
+    Object.assign(form,{name:'For Review',order:'7',color:'#abcdef'});dialog.options.onConfirm();
+    const custom=manager.state.settings.customStatuses[0];assert.equal(custom.label,'For Review');assert.equal(custom.order,7);assert.equal(custom.color,'#ABCDEF');assert.equal(dialog.visible,false);
+    await controller.setStatus(rows[0],custom.id);assert.equal(rowStatus(manager.state.packMetadata,manager.repository.paths,rows[0],manager.state.settings.customStatuses).color,'#ABCDEF');
+    controller.updateSettings('appearance','compact',true);assert.equal(manager.state.settings.customStatuses.length,1);
+    const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();
+    assert.equal(restarted.manager.state.settings.customStatuses[0].id,custom.id);
+    assert.equal(rowStatus(restarted.manager.state.packMetadata,restarted.manager.repository.paths,rows[0],restarted.manager.state.settings.customStatuses).label,'For Review');
+    const other=new RegistryRepository(fs,new PackPaths(path,root,'Other','other'));other.save({...manager.state.draft,weapon:'tacz:ak47',label:'Other',id:'ak47_other',collection:'Test',description:'Test'});
+    manager.attach(other);const otherRow=manager.state.rows[0];await controller.setStatus(otherRow,custom.id);assert.equal(rowStatus(manager.state.packMetadata,other.paths,otherRow,manager.state.settings.customStatuses).label,'For Review');
+    dialog=controller.createCustomStatus();form=dialog.options.component.data().status;Object.assign(form,{name:'for review',order:'3',color:'#FFFFFF'});
+    assert.equal(dialog.options.onConfirm(),false);assert.match(form.error,/already exists/);assert.equal(dialog.visible,true);
+    Object.assign(form,{name:'Unique',order:'1.5'});assert.equal(dialog.options.onConfirm(),false);assert.match(form.error,/whole number/);assert.equal(manager.state.settings.customStatuses.length,1);
+});
+
+test('custom status menu and Progress sorting use the same numeric order and render the custom flag',async t=>{
+    const {controller,manager,rows}=multipleSkins(t),dialogs=dialogEnvironment(t);
+    let dialog=controller.createCustomStatus();Object.assign(dialog.options.component.data().status,{name:'Review',order:'7',color:'#123456'});dialog.options.onConfirm();
+    const custom=manager.state.settings.customStatuses[0];
+    await controller.setStatus(rows[0],'complete');await controller.setStatus(rows[1],custom.id);await controller.setStatus(rows[2],'planned');
+    manager.sort('progress');assert.deepEqual(manager.filteredRows().map(row=>row.key),[rows[3].key,rows[2].key,rows[1].key,rows[0].key]);
+    const previous=global.Menu;let items;global.Menu=class{constructor(entries){items=entries;}open(){}};t.after(()=>{if(previous===undefined)delete global.Menu;else global.Menu=previous;});
+    controller.context(rows[1],{});const entries=items.find(item=>item.name==='Status').children;
+    assert.deepEqual(entries.map(item=>item.name),['Unassigned','Planned','Review','WIP','Complete','Custom Status']);assert.equal(entries[2].color,'#123456');
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const component=panelComponent(controller),panel=new Vue({...component,...Vue.compile(component.template)});assert.equal(panel.status(rows[1]).color,'#123456');assert.ok(panel._render());
+    dialog=controller.createCustomStatus();const definition=dialog.options.component,view=new Vue({...definition,...Vue.compile(definition.template)});
+    const flatten=node=>[node,...(node.children||[]).flatMap(flatten)];const help=flatten(view._render()).find(node=>node.data?.staticClass==='mcpskins-field-help');
+    assert.equal(help.data.attrs.title,'Default sort orders: Unassigned 0, Planned 5, WIP 10, Complete 20.');assert.ok(view._render());
+    await entries[0].click();assert.equal(panel.status(rows[1]),null);panel.$destroy();view.$destroy();
+});
+
+
+test('Collection picker lists manager collections and creates a collection without saving or losing an unfinished skin',async t=>{
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller,root,globals}=healthySavedPack(t),dialogs=dialogEnvironment(t),repository=controller.manager.repository;
+    const folder=path.join(repository.paths.pack,'data/other/collection_cases');fs.mkdirSync(folder,{recursive:true});
+    fs.writeFileSync(path.join(folder,'definition_only.json'),JSON.stringify({collection:'Definition Only'}));
+    fs.writeFileSync(path.join(folder,'defaults.json'),JSON.stringify({collection:'*',price:200}));
+    controller.manager.clear();controller.edit('label','Unfinished Skin');controller.edit('description','Keep my description');
+    const originalDraft=controller.manager.state.draft;const definition=panelComponent(controller),panel=new Vue({...definition,...Vue.compile(definition.template)});
+    const flatten=node=>[node,...(node.children||[]).flatMap(flatten)];const vnode=flatten(panel._render()).find(node=>node.componentOptions?.tag==='collection-picker');
+    const {collectionPicker}=require('../src/ui/collection-picker');
+    const picker=new Vue({...collectionPicker,...Vue.compile(collectionPicker.template),propsData:vnode.componentOptions.propsData,_parentListeners:vnode.componentOptions.listeners});
+    picker.$refs.trigger={focus(){}};picker.toggle();
+    await Vue.nextTick();picker.collections=panel.collectionOptions;
+    assert.ok(picker.options.includes('Definition Only'));assert.ok(picker.options.includes('Test'));assert.equal(picker.options.includes('*'),false);
+    const buttons=flatten(picker._render()).filter(node=>node.tag==='button');assert.equal(buttons.at(-1).children[0].text,'+ New Collection');
+    picker.create();await new Promise(resolve=>setImmediate(resolve));
+    const dialog=dialogs.at(-1),editor=controller.collectionEditor;assert.equal(dialog.options.title,'Collections Manager');assert.equal(editor.state.active,true);assert.equal(editor.selected,null);
+    assert.equal(controller.manager.state.draft,originalDraft);assert.equal(originalDraft.label,'Unfinished Skin');assert.equal(globals.prompt,undefined);
+    editor.edit('collection','Fresh Collection');editor.edit('description','Case description');assert.equal(editor.save(),true);
+    assert.equal(controller.manager.state.draft,originalDraft);assert.equal(originalDraft.collection,'Fresh Collection');assert.equal(originalDraft.description,'Keep my description');assert.equal(controller.manager.state.dirty,true);
+    assert.ok(panel.collectionOptions.includes('Fresh Collection'));assert.equal(controller.manager.state.rows.length,1);
+    const file=path.join(repository.paths.pack,'data/example/collection_cases/fresh_collection.json');assert.equal(JSON.parse(fs.readFileSync(file,'utf8')).collection,'Fresh Collection');
+    // Existing collections cannot rename registry entries while the underlying skin has unsaved edits.
+    await editor.select('test');editor.edit('collection','Renamed');assert.equal(editor.save(),false);assert.match(editor.state.error,/Save or discard your skin edits/);
+    picker.$destroy();panel.$destroy();
+});
+
+test('Collection picker selects existing names for bulk edits and refreshes its catalog when packs change',async t=>{
+    const {controller,manager,rows,root}=multipleSkins(t),dialogs=dialogEnvironment(t);
+    const {collectionPicker}=require('../src/ui/collection-picker');const emitted=[];
+    const picker={open:true,value:'',collections:['Bravo','Alpha','alpha','*'],mixed:true,$refs:{trigger:{focus(){}}},$emit:(event,value)=>{emitted.push([event,value]);if(event==='input')controller.edit('collection',value);}};
+    manager.selectRows(rows.slice(0,2));assert.deepEqual(collectionPicker.computed.options.call(picker),['Alpha','Bravo']);
+    collectionPicker.methods.choose.call(picker,'Bravo');assert.equal(manager.state.draft.collection,'Bravo');assert.equal(manager.state.mixed.collection,false);assert.equal(picker.open,false);
+    controller.refreshCollectionOptions();assert.ok(manager.state.collectionOptions.length>0);
+    const {RegistryRepository}=require('../src/storage/registry'),{PackPaths}=require('../src/domain/paths');
+    const other=new RegistryRepository(fs,new PackPaths(path,root,'Other','other'));manager.attach(other);controller.refreshCollectionOptions();assert.deepEqual(manager.state.collectionOptions,[]);
+});
+
+
+test('native export window filters skins and writes clean or full ZIPs using the chosen filename',async t=>{
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller,repository,globals,asset,root}=healthySavedPack(t),dialogs=dialogEnvironment(t);
+    fs.writeFileSync(path.join(repository.paths.pack,'mcpskins_manager.json'),JSON.stringify({title:'My Pack',author:'Team',version:'1.5'}));
+    fs.writeFileSync(asset('.bbmodel'),'project data');fs.writeFileSync(asset('_hud_lod.png'),'unused PNG');
+    let exported;globals.Blockbench.export=(options,callback)=>{exported=options;callback(path.join(root,options.name));};
+    assert.equal(await controller.openExport(),true);const dialog=dialogs.at(-1);assert.equal(dialog.id,'mcpskins_export');
+    const definition=dialog.options.component,view=new Vue({...definition,...Vue.compile(definition.template)});assert.ok(view._render());assert.equal(view.e.filename,'My Pack_Team_1.5.zip');
+    assert.equal(view.collections.length,1);assert.equal(view.statuses[0].label,'Unassigned');
+    view.all(false);assert.equal(view.e.selected.length,0);view.toggleGroup(view.collections[0].rows,{target:{checked:true}});assert.equal(view.e.selected.length,1);
+    await view.exportPack(false);assert.equal(exported.name,'My Pack_Team_1.5.zip');assert.equal(exported.savetype,'buffer');assert.equal(view.e.error,'');
+    assert.equal(exported.startpath,path.join(repository.paths.root,'Packed','My Pack_Team_1.5.zip'));assert.ok(fs.statSync(path.join(repository.paths.root,'Packed')).isDirectory());
+    assert.equal(fs.existsSync(path.join(repository.paths.pack,'Packed')),false);fs.writeFileSync(path.join(repository.paths.root,'Packed','keep.txt'),'keep');
+    const output=path.join(root,'export.zip');fs.writeFileSync(output,new Uint8Array(exported.content));
+    const {ZipPack,ArchiveCache}=require('../src/gunpacks/archive');const zlib=require('node:zlib');
+    let zip=new ZipPack(new ArchiveCache(fs),output,zlib.inflateRawSync);assert.ok(zip.read('data/example/skins/ai_awp_skins.json'));
+    assert.equal([...zip.entries.keys()].some(name=>name.endsWith('.bbmodel') || name.endsWith('.json') && name.startsWith('assets/mcpskins/textures')),false);
+    assert.equal([...zip.entries.keys()].some(name=>name.endsWith('_hud_lod.png')),false);
+    view.all(false);view.e.filename='Full Backup.zip';await view.exportPack(true);assert.equal(view.e.error,'');assert.equal(exported.name,'Full Backup.zip');assert.equal(exported.startpath,path.join(repository.paths.root,'Packed','Full Backup.zip'));assert.equal(fs.readFileSync(path.join(repository.paths.root,'Packed','keep.txt'),'utf8'),'keep');
+    fs.writeFileSync(output,new Uint8Array(exported.content));zip=new ZipPack(new ArchiveCache(fs),output,zlib.inflateRawSync);
+    assert.ok(zip.read('mcpskins_manager.json'));assert.ok([...zip.entries.keys()].some(name=>name.endsWith('.bbmodel')));assert.ok([...zip.entries.keys()].some(name=>name.endsWith('_hud_lod.png')));
+    assert.equal(fs.readFileSync(asset('.bbmodel'),'utf8'),'project data');view.$destroy();
+});
+
+test('export honors unsaved-edit cancellation and stops a canceled ZIP job before opening the save dialog',async t=>{
+    const {controller,globals}=healthySavedPack(t),dialogs=dialogEnvironment(t);
+    controller.manager.select(controller.manager.state.rows[0]);controller.edit('description','Keep edit');
+    let pending=controller.openExport();globals.prompt.callback(globals.prompt.options.buttons.indexOf('Cancel'));assert.equal(await pending,false);assert.equal(dialogs.length,0);
+    controller.revert();await controller.openExport();const dialog=dialogs.at(-1),component=dialog.options.component;let saves=0;
+    globals.Blockbench.export=()=>{saves++;};pending=component.methods.exportPack(false);dialog.options.onCancel();await pending;
+    assert.equal(saves,0);assert.equal(dialog.visible,false);assert.match(component.data().e.error,/canceled/);
+});
+
+
+test('LOD inspector reports file states and generation preserves UVs, maps and stock-model mode with replacement confirmation',async t=>{
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller,repository,globals,asset,png}=healthySavedPack(t);
+    controller.manager.select(controller.manager.state.rows[0]);controller.updatePreviews();
+    assert.deepEqual(controller.manager.state.lodFiles.map(file=>file.status),['missing','missing']);
+    fs.writeFileSync(asset('_s.png'),png());fs.writeFileSync(asset('_n.png'),png());
+    await controller.generateLOD();
+    assert.deepEqual(controller.manager.state.lodFiles.map(file=>file.status),['valid','valid']);assert.equal(controller.manager.state.customModel,false);
+    const id=controller.manager.state.draft.id,model=path.join(repository.paths.pack,'assets/tacz/geo_models/gun/lod','ai_awp__skin_'+id+'.json');
+    assert.deepEqual(fs.readFileSync(model),fs.readFileSync(asset('.json')));assert.deepEqual(fs.readFileSync(asset('_lod_s.png')),fs.readFileSync(asset('_s.png')));
+    const component=panelComponent(controller),panel=new Vue({...component,...Vue.compile(component.template)});assert.ok(panel._render());
+    fs.writeFileSync(asset('_lod.png'),'existing LOD painting');controller.updateLODStatus();assert.equal(controller.manager.state.lodFiles[0].status,'invalid');
+    let pending=controller.generateLOD();await new Promise(resolve=>setImmediate(resolve));assert.equal(globals.prompt.options.title,'Generate LODs');globals.prompt.callback(1);await pending;
+    assert.equal(fs.readFileSync(asset('_lod.png'),'utf8'),'existing LOD painting');
+    pending=controller.generateLOD();await new Promise(resolve=>setImmediate(resolve));globals.prompt.callback(0);await pending;
+    assert.deepEqual(fs.readFileSync(asset('_lod.png')),fs.readFileSync(asset('.png')));assert.equal(controller.manager.state.lodFiles[0].status,'valid');
+    ModelProject.all.push({export_path:asset('.json'),saved:false,textures:[]});await controller.generateLOD();assert.match(globals.prompt.options.message,/Save the full model/);
+    panel.$destroy();
+});
+
+test('LOD discovery remembers the gun pack reference and generation uses it rather than assuming the TaCZ folder',async t=>{
+    const {controller,root,local,nativeRequire}=setup(t),directory=path.join(root,'sources');
+    const source=runtimeSourcePack(directory,'Custom');
+    const displayFile=path.join(source,'assets/custom/display/guns/rifle_display.json'),display=JSON.parse(fs.readFileSync(displayFile,'utf8'));
+    display.lod={model:'custom:gun/lod/rifle_low'};fs.writeFileSync(displayFile,JSON.stringify(display));
+    local.setItem('mcpskins_asset_manager.gunpacks.v1',JSON.stringify({directories:{[root]:directory}}));
+    const repository=controller.manager.repository;
+    repository.save({...controller.manager.state.draft,weapon:'custom:rifle',label:'Copper',id:'rifle_copper',collection:'Test',description:'Test'});
+    controller.manager.reload();controller.manager.select(controller.manager.state.rows[0]);
+    const texture=path.join(repository.paths.textures('custom:rifle'),'rifle_copper.png');fs.mkdirSync(path.dirname(texture),{recursive:true});
+    const bytes=Buffer.alloc(24);Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);bytes.write('IHDR',12);bytes.writeUInt32BE(256,16);bytes.writeUInt32BE(256,20);fs.writeFileSync(texture,bytes);
+    await controller.generateLOD();
+    assert.ok(fs.existsSync(path.join(repository.paths.pack,'assets/custom/geo_models/gun/lod/rifle_low__skin_rifle_copper.json')));
+    assert.equal(controller.manager.state.packMetadata.weapon_lod_models['gun:custom:rifle'],'custom:gun/lod/rifle_low');
+    const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();
+    restarted.manager.select(restarted.manager.state.rows[0]);restarted.updatePreviews();assert.equal(restarted.manager.state.lodFiles[1].status,'valid');
+});
+
+
+test('Debug health option skips Unassigned, Planned and custom orders up to five, and persists across reloads',async t=>{
+    const {controller,asset,local,nativeRequire}=healthySavedPack(t),state=controller.manager.state,row=state.rows[0];
+    const {settingsFrom}=require('../src/domain/preferences');assert.equal(settingsFrom().health.skipLowOrder,true);
+    fs.unlinkSync(asset('.png'));assert.ok(controller.updateHealth(true).issues.some(issue=>issue.message==='Skin texture is missing.'));
+    state.settings.customStatuses=[{id:'custom_low',label:'Backlog',order:-2,color:'#123456'},{id:'custom_five',label:'Queued',order:5,color:'#654321'},{id:'custom_six',label:'Review',order:6,color:'#ABCDEF'}];
+    controller.updateSettings('health','skipLowOrder',true);assert.equal(controller.healthReport.skipped,1);assert.equal(controller.healthReport.skins,0);assert.equal(state.health.status,'good');
+    for(const status of ['planned','custom_low','custom_five']){await controller.setStatus(row,status);assert.equal(controller.healthReport.skipped,1);assert.equal(controller.healthReport.issues.length,0);}
+    for(const status of ['custom_six','wip','complete']){await controller.setStatus(row,status);assert.equal(controller.healthReport.skipped,0);assert.ok(controller.healthReport.issues.some(issue=>issue.message==='Skin texture is missing.'));}
+    await controller.setStatus(row,'planned');controller.updateSettings('health','skipLowOrder',false);assert.ok(controller.healthReport.issues.some(issue=>issue.message==='Skin texture is missing.'));
+    controller.updateSettings('health','skipLowOrder',true);
+    const restarted=new Controller(nativeRequire,local);t.after(()=>restarted.dispose());restarted.start();assert.equal(restarted.manager.state.settings.health.skipLowOrder,true);assert.equal(restarted.updateHealth(true).skipped,1);
+});
+
+test('status skipping suppresses entry and variant warnings while retaining pack-wide errors and reports the skipped count',async t=>{
+    const Vue=installedVue();if(!Vue){t.skip('Installed Blockbench bundle not available');return;}
+    const {controller,repository,asset}=healthySavedPack(t);dialogEnvironment(t);const row=controller.manager.state.rows[0];
+    const data=JSON.parse(fs.readFileSync(row.filename,'utf8'));data.author=123;data.skins[0].variants=['missing_variant'];data.skins[0].description='';fs.writeFileSync(row.filename,JSON.stringify(data));fs.unlinkSync(asset('.png'));
+    controller.updateSettings('health','skipLowOrder',true);const report=controller.updateHealth(true);
+    assert.equal(report.skipped,1);assert.ok(report.issues.some(issue=>issue.message==='File author must be text.'));
+    assert.equal(report.issues.some(issue=>issue.skinId),false);
+    const {healthComponent}=require('../src/ui/health');const component=healthComponent(report,()=>{},()=>{}),view=new Vue({...component,...Vue.compile(component.template)});
+    const flatten=node=>[node,...(node.children||[]).flatMap(flatten)];assert.ok(flatten(view._render()).some(node=>node.text?.includes('1 skin(s) skipped')));view.$destroy();
 });

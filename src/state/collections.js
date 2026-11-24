@@ -2,8 +2,8 @@
 const {caseDraft, buildCase, effectiveCase, caseOdds, collectionKey} = require('../domain/collections');
 const {collectionIssues} = require('../storage/collections');
 class CollectionEditor {
-    constructor(repository, rarities, confirm, saved, active = () => true) {
-        Object.assign(this, {repository, rarities, confirm, saved, active, selected:null});
+    constructor(repository, rarities, confirm, saved, active = () => true, canRename = () => true) {
+        Object.assign(this, {repository, rarities, confirm, saved, active, canRename, selected:null});
         this.state = {rows:[], warnings:[], search:'', selectedKey:'', active:false, draft:caseDraft(null,rarities), dirty:false, busy:false, error:'', notice:''};
         this.load();
     }
@@ -54,6 +54,7 @@ class CollectionEditor {
     save() {
         try {
             if (!this.active()) throw new Error('The selected pack changed or has unsaved skin edits. Save those edits and reopen Collections.');
+            if(this.selected && this.state.draft.collection.trim()!==this.selected.name && !this.canRename()) throw new Error('Save or discard your skin edits before renaming a collection.');
             const result = this.repository.save(this.state.draft,this.selected,this.scan);
             this.load(result.key); this.saved(result); this.state.notice = result.renamed ? 'Collection and matching skin entries renamed.' : 'Collection saved.';
             return true;

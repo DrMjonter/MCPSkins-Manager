@@ -34,4 +34,20 @@ function isDirectory(fs, filename) {
     try { return fs.statSync(filename).isDirectory(); } catch { return false; }
 }
 
-module.exports = {readJSON, atomicJSON, isFile, isDirectory};
+// Blockbench's scoped filesystem has Dirent inspection but no lstatSync/realpathSync.
+function assertNoSymbolicLinks(fs, path, root, filename) {
+    const relative=path.relative(root,filename);
+    if(relative==='..' || relative.startsWith('..'+path.sep) || path.isAbsolute(relative))throw new Error('File path is outside the selected pack.');
+    const same=(a,b)=>path.sep==='\\'?a.toLowerCase()===b.toLowerCase():a===b;
+    let current=root;
+    for(const part of [null,...relative.split(path.sep).filter(Boolean)]) {
+        if(part!==null)current=path.join(current,part);
+        const parent=path.dirname(current);
+        if(!isDirectory(fs,parent))break;
+        const entry=fs.readdirSync(parent,{withFileTypes:true}).find(entry=>same(entry.name,path.basename(current)));
+        if(!entry)break;
+        if(entry.isSymbolicLink())throw new Error('Cannot modify files through symbolic links: '+current);
+    }
+}
+
+module.exports = {readJSON, atomicJSON, isFile, isDirectory, assertNoSymbolicLinks};

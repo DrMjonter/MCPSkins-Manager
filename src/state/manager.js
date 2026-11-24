@@ -11,14 +11,14 @@ class Manager {
         this.selection = [];
         this.anchorKey = '';
         this.duplicateSource = null;
-        this.state = {settings: settingsFrom(), update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
+        this.state = {lodFiles:[],collectionOptions:[], settings: settingsFrom(), update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
             gunPackItems: [], gunPackDirectory: '', gunPackMessage: '', gunPackWarnings: [], packMetadata: {title: 'Pack Name'}, directory: '', rows: [], selectedKey: '', selectedKeys: [], duplicatePending: false, mixed: {}, changedFields: [], draft: emptyDraft(), search: '', rarityFilter: '', collectionFilter: '',
             health: {status: 'checking', errors: 0, warnings: 0}, customModel: false, rarities: defaultRarities(), sortColumn: 'gun', descending: false, missing: false, warnings: [], previews: [], notice: '', theme: 'Blockbench', weaponNames: {}};
     }
     attach(repository, result = repository.discover()) {
         this.repository = repository;
         const p = repository.paths;
-        Object.assign(this.state, {ready: true, root: p.root, folder: p.folder, namespace: p.namespace, directory: p.registryDirectory,
+        Object.assign(this.state, {collectionOptions:[],ready: true, root: p.root, folder: p.folder, namespace: p.namespace, directory: p.registryDirectory,
             rows: result.rows, warnings: result.warnings, missing: result.missing, rarities: result.rarities || defaultRarities(), rarityFilter: '', collectionFilter: '', health: {status: 'checking', errors: 0, warnings: 0}});
         this.clear(false);
     }
@@ -164,8 +164,8 @@ class Manager {
             const values = {gun, name: row.skin.name ?? '', rarity: row.skin.rarity ?? '',
                 collection: row.skin.collection ?? '', is_new: row.skin.is_new ? 1 : 0, file: this.repository.paths.path.basename(row.filename)};
             const rarityRank = rarityRanks.get(String(row.skin.rarity ?? '').trim().toLowerCase()) ?? rarityRanks.size;
-            const status = rowStatus(s.packMetadata, this.repository.paths, row);
-            const progressRank = status ? ['Planned', 'WIP', 'Complete'].indexOf(status.label) : 3;
+            const status = rowStatus(s.packMetadata, this.repository.paths, row, s.settings.customStatuses);
+            const progressRank = status ? status.order : 0;
             const primary = s.sortColumn === 'rarity' ? rarityRank
                 : s.sortColumn === 'progress' ? progressRank : String(values[s.sortColumn]).toLowerCase();
             return [primary, gun, String(row.skin.name ?? '').toLowerCase()];

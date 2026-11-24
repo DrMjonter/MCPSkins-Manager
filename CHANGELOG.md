@@ -1,5 +1,20 @@
 # MCPSkins Manager
 
+## 1.2.2
+
+### Major Changes
+
+- Added LOD generation and status indicators
+- Added pack exporting with individual skin selection. Includes a clean runtime ZIP and a full backup option with project files.
+
+### Quality of Life
+
+- Fixed errors when deleting skins or generating LODs.
+- Added custom statuses with names, colors, and sort order.
+- Added an optional health-check filter for Planned(5) and lower-order statuses.
+- Added a collection dropdown in the Asset Inspector with quick collection creation that preserved unfinished skin edits.
+- Added individual skin deletion with options to keep asset files or remove them along with the entry. Included confirmation and cleanup of variant links and level rewards.
+
 ## 1.2.1
 
 ### Major Changes

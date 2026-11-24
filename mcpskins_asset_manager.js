@@ -97,9 +97,15 @@ const {animationComponent} = require("src/ui/animation.js");
 const {NativeAnimations,saveNativeMetadata} = require("src/integration/native-animation.js");
 const {UpdateChecker} = require("src/integration/updates.js");
 const {PackPaths, packDirectorySelection} = require("src/domain/paths.js");
-const {clone, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames, isObject} = require("src/domain/skin.js");
+const {clone, equalJSON, defaultColor, emptyDraft, validComponent, normalizedWeapon, validWeapon, isDefaultWeapon, sanitizeWeaponNames, isObject} = require("src/domain/skin.js");
+const {exportInventory,runtimePlan,validateFilename} = require("src/assets/pack-export.js");
+const {ExportSelection} = require("src/state/export.js");
+const {exportComponent} = require("src/ui/export.js");
+const {createZip} = require("src/integration/zip.js");
+const {lodStatus,planLOD,writeLOD} = require("src/assets/lod.js");
 const {THEMES} = require("src/domain/constants.js");
 const {RegistryRepository} = require("src/storage/registry.js");
+const {deleteSkin:removeSkin} = require("src/storage/delete-skin.js");
 const {RarityRepository} = require("src/storage/rarity-editor.js");
 const {RarityEditor} = require("src/state/rarities.js");
 const {rarityComponent} = require("src/ui/rarities.js");
@@ -109,11 +115,12 @@ const {collectionComponent} = require("src/ui/collections.js");
 const {settingsComponent} = require("src/ui/settings.js");
 const {SETTINGS, settingsFrom} = require("src/domain/preferences.js");
 const {loadPackSettings, savePackSettings} = require("src/storage/settings.js");
-const {loadPackMetadata, savePackMetadata} = require("src/storage/pack-metadata.js");
+const {loadPackMetadata, savePackMetadata,metadataFile} = require("src/storage/pack-metadata.js");
 const {newPackPaths, createPack} = require("src/storage/new-pack.js");
 const {RECENT_PACKS, recentPacks, rememberPack} = require("src/storage/recent-packs.js");
 const {atomicJSON, isDirectory} = require("src/storage/files.js");
-const {STATUSES, saveStatuses} = require("src/domain/status.js");
+const {availableStatuses, sortedStatuses, newCustomStatus, saveStatuses} = require("src/domain/status.js");
+const {customStatusComponent} = require("src/ui/custom-status.js");
 const {checkPack} = require("src/assets/health.js");
 const {healthSnapshot, healthSummary, healthIssueKey, applyHealthIgnores} = require("src/assets/health-monitor.js");
 const {shortcutComponent} = require("src/ui/keyboard.js");
@@ -169,7 +176,7 @@ class Controller {
     start() {
         this.checkForUpdates();
         if (!this.healthPoll) {
-            this.healthPoll = setInterval(() => { this.updateHealth(); this.animations.forEach(session => session.poll()); this.nativeAnimations.poll(); }, 3000);
+            this.healthPoll = setInterval(() => { this.updateHealth(); this.updateLODStatus(); this.animations.forEach(session => session.poll()); this.nativeAnimations.poll(); }, 3000);
             if (this.healthPoll && typeof this.healthPoll.unref === 'function') this.healthPoll.unref();
         }
         this.manager.state.weaponNames = sanitizeWeaponNames(this.getStored(WEAPON_NAMES));
@@ -213,11 +220,19 @@ class Controller {
         try {
             this.manager.state.packMetadata = loadPackMetadata(repository.fs, repository.paths);
             repository.paths.modelReferences = this.manager.state.packMetadata.weapon_models || {};
+            repository.paths.lodReferences = this.manager.state.packMetadata.weapon_lod_models || {};
         }
         catch (error) {
             this.manager.state.packMetadata = {title: 'Pack Name'};
             this.manager.state.notice = `Pack metadata unavailable: ${error.message}`;
         }
+        this.refreshCollectionOptions();
+    }
+    refreshCollectionOptions() {
+        if(this.disposed || !this.manager.repository) return;
+        const repository=this.manager.repository;
+        const scan=new CollectionRepository(repository.fs,repository.paths).scan();
+        this.manager.state.collectionOptions=scan.rows.filter(row=>row.key!=='*').map(row=>row.name);
     }
     updatePackMetadata(changes, expectedPack) {
         if (!this.manager.state.ready || this.disposed) return Promise.resolve(false);
@@ -350,29 +365,82 @@ class Controller {
             this.dialogs.add(dialog); dialog.show(); return dialog;
         });
     }
-    openCollections() {
+    openCollections(createNew = false) {
         if (!this.manager.state.ready || this.disposed) return;
         if (this.collectionEditor) {
             const existing = [...this.dialogs].find(dialog => dialog.id === 'mcpskins_collections');
-            if (existing) { existing.show(); return existing; }
+            if (existing) { existing.show(); if(createNew)this.collectionEditor.create(); return existing; }
         }
-        return this.runTransition(() => {
+        const open=() => {
             this.removeDialog('mcpskins_collections');
             const repository = this.manager.repository;
+            const originalDraft=this.manager.state.draft;
             const editor = new CollectionEditor(new CollectionRepository(repository.fs, repository.paths), this.manager.state.rarities,
                 () => confirmUnsaved({title:'Unsaved collection edits', message:'Save your collection changes before continuing?'}),
                 result => {
                     if (result.renamed) this.manager.state.collectionFilter = '';
-                    this.manager.reload(); this.remember(); this.updatePreviews(); this.updateHealth(true);
-                }, () => !this.disposed && this.manager.repository === repository && !this.manager.state.dirty);
+                    if(createNew && result.created && this.manager.state.draft===originalDraft && this.manager.state.active) this.edit('collection',editor.state.draft.collection);
+                    if(!this.manager.state.dirty)this.manager.reload();
+                    this.refreshCollectionOptions();this.remember();this.updatePreviews();this.updateHealth(true);
+                }, () => !this.disposed && this.manager.repository === repository && (createNew || !this.manager.state.dirty),
+                () => !this.manager.state.dirty);
             this.collectionEditor = editor;
+            if(createNew)editor.create();
             const close = () => {
                 editor.guard(() => { dialog.hide(); if (this.collectionEditor === editor) this.collectionEditor = null; });
                 return false;
             };
-            const dialog = new Dialog('mcpskins_collections', {title:'Pack Collections', width:1040, buttons:['Close'], confirmIndex:0, cancelIndex:0,
+            const dialog = new Dialog('mcpskins_collections', {title:'Collections Manager', width:1040, buttons:['Close'], confirmIndex:0, cancelIndex:0,
                 component:collectionComponent(editor), onConfirm:close, onCancel:close});
             this.dialogs.add(dialog); dialog.show(); return dialog;
+        };
+        return createNew?this.run(open):this.runTransition(open);
+    }
+    openExport() {
+        if(!this.manager.state.ready || this.disposed)return;
+        return this.runTransition(()=>{
+            if(this.cancelPackExport)this.cancelPackExport();
+            this.removeDialog('mcpskins_export');
+            const repository=this.manager.repository,metadata=loadPackMetadata(repository.fs,repository.paths);
+            const inventory=exportInventory(repository.fs,repository.paths,metadata,this.manager.state.settings.customStatuses);
+            const selection=new ExportSelection(inventory,metadata),state=selection.state;
+            let canceled=false;
+            const cancel=()=>{canceled=true;};this.cancelPackExport=cancel;
+            const exportPack=async full=>{
+                if(state.busy || canceled)return;
+                Object.assign(state,{busy:true,error:'',notice:'',progress:'Preparing export...'});
+                try {
+                    const filename=validateFilename(state.filename);
+                    if(!state.version.trim())throw new Error('Enter a pack version for the export.');
+                    const current=exportInventory(repository.fs,repository.paths,metadata,this.manager.state.settings.customStatuses);
+                    if(!full) {
+                        const byKey=new Map(inventory.rows.map(row=>[row.key,row]));
+                        for(const key of state.selected) {
+                            const before=byKey.get(key),after=current.rows.find(row=>row.key===key);
+                            if(!before || !after || !equalJSON(before.data,after.data))throw new Error('Skin registries changed. Reopen Export Pack before exporting.');
+                        }
+                    }
+                    const plan=full?{entries:[...current.files.values()],skins:current.rows.length,omitted:0}:runtimePlan(current,state.selected);
+                    const zip=await createZip(plan.entries,this.desktop.require('zlib').deflateRawSync,
+                        (count,total)=>{state.progress='Packing '+count+' of '+total+' files...';},
+                        ()=>canceled || this.disposed || this.manager.repository!==repository);
+                    if(canceled || this.disposed || this.manager.repository!==repository)return;
+                    const outputDirectory=repository.paths.inside('Packed');
+                    if(this.desktop.path.relative(repository.paths.pack,outputDirectory)==='')throw new Error('The export folder must be beside the pack. Choose a pack folder other than Packed.');
+                    repository.fs.mkdirSync(outputDirectory,{recursive:true});
+                    let saved=false;
+                    Blockbench.export({type:'MCPSkins pack',extensions:['zip'],name:filename,startpath:this.desktop.path.join(outputDirectory,filename),savetype:'buffer',content:zip.buffer.slice(zip.byteOffset,zip.byteOffset+zip.byteLength),resource_id:'mcpskins_pack_export'},()=>{
+                        saved=true;
+                        state.notice='Exported '+plan.skins+' skin(s) in '+plan.entries.length+' files'+(full?'.':' ('+plan.omitted+' files omitted).');
+                        Blockbench.showQuickMessage('Pack exported',3500);
+                    });
+                    if(!saved)state.notice='Export canceled.';
+                } catch(error) {state.error=error.message;}
+                finally {state.busy=false;state.progress='';}
+            };
+            const close=()=>{cancel();dialog.hide();return false;};
+            const dialog=new Dialog('mcpskins_export',{title:'Export Pack',width:1000,buttons:[],component:exportComponent(selection,exportPack),onConfirm:close,onCancel:close});
+            this.dialogs.add(dialog);dialog.show();return dialog;
         });
     }
     async resolveGunPack(draft) {
@@ -646,10 +714,62 @@ class Controller {
         }
     }
     schedulePreviews() { clearTimeout(this.timer); this.timer = setTimeout(() => this.updatePreviews(), 160); }
+    updateLODStatus() {
+        const state=this.manager.state;
+        if(!state.ready || this.disposed)return;
+        state.lodFiles=[];
+        if(this.manager.selection.length>1 || this.manager.duplicateSource)return;
+        try {state.lodFiles=lodStatus(this.manager.repository.fs,this.manager.repository.paths,state.draft);}
+        catch(error){state.lodFiles=[{kind:'model',label:'LOD Model',path:'',filename:'',status:'invalid',message:error.message}];}
+    }
+    generateLOD() {
+        const state=this.manager.state;
+        if(!state.ready || state.draft.kind!=='gun' || this.manager.selection.length>1 || this.manager.duplicateSource)return;
+        return this.run(async()=>{
+            if(!state.selectedKey || state.dirty)throw new Error('Save the skin entry before generating LODs.');
+            const repository=this.manager.repository,draft=state.draft;
+            let source=null;
+            try{source=await this.resolveGunPack(draft);}catch(error){if(!repository.paths.lodReferences[modelKey(draft.weapon,draft.kind)] && !draft.weapon.startsWith('tacz:'))throw error;}
+            if(source===false || this.disposed || this.manager.repository!==repository || state.draft!==draft || state.dirty)return;
+            let plan=planLOD(repository.fs,repository.paths,draft,source);
+            const guard=plan=>{
+                const same=(file,list)=>file && list.some(candidate=>this.bridge.same(file,candidate));
+                if(typeof ModelProject!=='undefined')for(const project of ModelProject.all) {
+                    const outputs=plan.files.map(([file])=>file);
+                    if(same(project.export_path,outputs) || same(project.save_path,outputs) || (project.textures || []).some(texture=>same(texture.path,outputs)))throw new Error('Save and close open LOD model or texture projects before generating LODs.');
+                    if(project.saved===false && (same(project.export_path,plan.sources) || same(project.save_path,plan.sources)) || (project.textures || []).some(texture=>texture.saved===false && same(texture.path,plan.sources)))throw new Error('Save the full model and painted textures in Blockbench before generating LODs.');
+                }
+                for(const session of this.animations.values())if((session.running || session.state.busy || session.state.dirty) && same(session.texture,[...plan.sources,...plan.files.map(([file])=>file)]))throw new Error('Save or discard pending animation edits before generating LODs.');
+            };
+            guard(plan);
+            if(plan.existing.length) {
+                const replace=await new Promise(resolve=>Blockbench.showMessageBox({title:'Generate LODs',message:'Replace existing LOD files with copies of this skin\'s full model and textures?',buttons:['Replace','Cancel'],confirm:1,cancel:1},resolve));
+                if(replace!==0 || this.disposed || this.manager.repository!==repository || state.draft!==draft || state.dirty)return;
+                plan=planLOD(repository.fs,repository.paths,draft,source);guard(plan);
+            }
+            const metadata=loadPackMetadata(repository.fs,repository.paths);
+            if(metadata.weapon_lod_models!==undefined && !isObject(metadata.weapon_lod_models))throw new Error('Pack weapon_lod_models must be a JSON object.');
+            const lodReferences={...metadata.weapon_lod_models,[modelKey(draft.weapon,draft.kind)]:plan.reference};
+            const updated={...metadata,weapon_lod_models:lodReferences};
+            if(source) {
+                if(metadata.weapon_models!==undefined && !isObject(metadata.weapon_models))throw new Error('Pack weapon_models must be a JSON object.');
+                updated.weapon_models={...metadata.weapon_models,[modelKey(draft.weapon,draft.kind)]:source.modelRef};
+            }
+            writeLOD(repository.fs,repository.paths,[...plan.files,[metadataFile(repository.paths),JSON.stringify(updated,null,2)+'\n']]);
+            state.packMetadata=updated;repository.paths.lodReferences=lodReferences;
+            if(updated.weapon_models)repository.paths.modelReferences=updated.weapon_models;
+            const targets=plan.files.map(([file])=>file),matches=filename=>targets.some(file=>this.bridge.same(filename,file));
+            for(const [filename,session] of this.animations)if(matches(filename)){session.dispose();this.animations.delete(filename);}
+            for(const record of this.nativeAnimations.records)if(matches(record.texture.path))this.nativeAnimations.records.delete(record);
+            state.notice='LOD model and textures generated from the saved full model and painted textures. UVs are preserved; geometry was not simplified.';
+            this.updateLODStatus();this.updateHealth(true);Blockbench.showQuickMessage('LODs generated',3000);
+        });
+    }
     updatePreviews() {
         clearTimeout(this.timer);
         if (!this.manager.state.ready || this.disposed) return;
         this.scheduleHealth();
+        this.updateLODStatus();
         this.manager.state.customModel = false;
         if (this.manager.selection.length > 1 || this.manager.duplicateSource) { this.manager.state.previews = []; return; }
         try {
@@ -736,10 +856,13 @@ class Controller {
                         try {
                             const metadata = loadPackMetadata(repository.fs, repository.paths);
                             if (metadata.weapon_models !== undefined && !isObject(metadata.weapon_models)) throw new Error('Pack weapon_models must be a JSON object.');
+                            if (metadata.weapon_lod_models !== undefined && !isObject(metadata.weapon_lod_models)) throw new Error('Pack weapon_lod_models must be a JSON object.');
                             const references = {...metadata.weapon_models, [modelKey(draft.weapon, draft.kind)]: source.modelRef};
-                            this.manager.state.packMetadata = metadata.weapon_models && metadata.weapon_models[modelKey(draft.weapon, draft.kind)] === source.modelRef
-                                ? metadata : savePackMetadata(repository.fs, repository.paths, {weapon_models: references});
+                            const lodReferences={...metadata.weapon_lod_models,[modelKey(draft.weapon,draft.kind)]:source.lodModelRef || null};
+                            this.manager.state.packMetadata = metadata.weapon_models && metadata.weapon_models[modelKey(draft.weapon, draft.kind)] === source.modelRef && metadata.weapon_lod_models && metadata.weapon_lod_models[modelKey(draft.weapon,draft.kind)]===(source.lodModelRef || null)
+                                ? metadata : savePackMetadata(repository.fs, repository.paths, {weapon_models: references,weapon_lod_models:lodReferences});
                             repository.paths.modelReferences = references;
+                            repository.paths.lodReferences = lodReferences;
                         } catch (error) { for (const filename of files.created) repository.fs.unlinkSync(filename); throw error; }
                     }
                     if (source && source.editorOnly) this.manager.state.notice = 'LesRaisins geometry is an editing reference. MCPSkins applies texture and icon changes to these items.';
@@ -885,9 +1008,30 @@ class Controller {
         return this.run(() => {
             const repository = this.manager.repository;
             const rows = this.manager.state.selectedKeys.includes(row.key) ? this.manager.selection : [row];
-            this.manager.state.packMetadata = saveStatuses(repository.fs, repository.paths, rows, status);
-            Blockbench.showQuickMessage(`${rows.length} skin${rows.length === 1 ? '' : 's'}: ${status === null ? 'status cleared' : STATUSES[status].label}`, 2500);
+            const custom=this.manager.state.settings.customStatuses;
+            this.manager.state.packMetadata = saveStatuses(repository.fs, repository.paths, rows, status,custom);
+            if(this.manager.state.settings.health.live)this.updateHealth(true);
+            Blockbench.showQuickMessage(`${rows.length} skin${rows.length === 1 ? '' : 's'}: ${status === null ? 'Unassigned' : availableStatuses(custom)[status].label}`, 2500);
         });
+    }
+    createCustomStatus() {
+        if(this.disposed) return;
+        this.removeDialog('mcpskins_custom_status');
+        const state={name:'',order:'15',color:'#6DA9E4',error:''};
+        const dialog=new Dialog('mcpskins_custom_status',{title:'Custom Status',width:440,buttons:['Cancel','Done'],confirmIndex:1,cancelIndex:0,
+            component:customStatusComponent(state),onConfirm:()=>{
+                try {
+                    if(this.disposed) return false;
+                    const current=this.manager.state.settings;
+                    const status=newCustomStatus(state,current.customStatuses);
+                    const settings=settingsFrom({...current,customStatuses:[...current.customStatuses,status]});
+                    this.storage.setItem(SETTINGS,JSON.stringify(settings));
+                    this.manager.state.settings=settings;
+                    Blockbench.showQuickMessage('Custom status added',2500);
+                    dialog.hide();
+                } catch(error) {state.error=error.message;return false;}
+            }});
+        this.dialogs.add(dialog);dialog.show();return dialog;
     }
     scheduleHealth() {
         clearTimeout(this.healthTimer);
@@ -902,9 +1046,9 @@ class Controller {
         const repository = this.manager.repository;
         let stamp, report;
         try {
-            stamp = healthSnapshot(repository.fs, repository.paths);
+            stamp = healthSnapshot(repository.fs, repository.paths)+JSON.stringify([this.manager.state.settings.health,this.manager.state.settings.customStatuses]);
             if (!force && this.healthRepository === repository && this.healthStamp === stamp && this.healthReport) return this.healthReport;
-            report = checkPack(repository.fs, repository.paths, this.manager.state.settings.health);
+            report = checkPack(repository.fs, repository.paths, {...this.manager.state.settings.health,customStatuses:this.manager.state.settings.customStatuses});
             let metadata = {};
             try { metadata = loadPackMetadata(repository.fs, repository.paths); } catch { /* The report already includes the metadata error. */ }
             applyHealthIgnores(report, repository.paths, metadata);
@@ -957,16 +1101,42 @@ class Controller {
             return report;
         });
     }
+    deleteSkin(row) {
+        const repository=this.manager.repository;
+        return this.runTransition(async () => {
+            const target=this.freshRows([row])[0];
+            const choice=await new Promise(resolve=>Blockbench.showMessageBox({title:'Delete Skin',
+                message:'Delete "'+String(target.skin.name || target.skin.id)+'"?\n\nFull Delete removes all related files, including textures and icons.\n\nDelete Entry only removes skin registry entry.',
+                buttons:['Full Delete','Delete Entry','Cancel'],confirm:2,cancel:2},resolve));
+            if (choice!==0 && choice!==1 || this.disposed || this.manager.repository!==repository) return;
+            const result=removeSkin(repository,target,choice===0,assets=>{
+                const matches=filename=>filename && assets.related.some(file=>this.bridge.same(filename,file));
+                if(typeof ModelProject!=='undefined' && ModelProject.all.some(project=>matches(project.export_path) || matches(project.save_path) || (project.textures || []).some(texture=>matches(texture.path)))) {
+                    throw new Error('Save and close the skin\'s open model and texture projects before Full Delete. Delete Entry keeps those files.');
+                }
+                for(const session of this.animations.values()) if(matches(session.texture) && !session.disposed && (session.running || session.state.busy || session.state.dirty)) throw new Error('Save or discard this skin\'s pending animation edits before Full Delete.');
+            });
+            if(result.full) {
+                const matches=filename=>filename && result.related.some(file=>this.bridge.same(filename,file));
+                for(const [filename,session] of this.animations) if(matches(filename)) {session.dispose();this.animations.delete(filename);}
+                for(const record of this.nativeAnimations.records) if(matches(record.texture.path)) this.nativeAnimations.records.delete(record);
+            }
+            this.manager.reload();this.loadMetadata();this.remember();this.updatePreviews();this.updateHealth(true);
+            this.manager.state.notice=result.warning || 'Skin deleted'+(result.full?' with its related files.':'. Asset files were kept.');
+            Blockbench.showQuickMessage(result.full?'Skin and related files deleted':'Skin entry deleted',3500);
+        });
+    }
     context(row, event) {
-        new Menu([{name: 'Status', icon: 'flag', children: [
-                ...Object.entries(STATUSES).map(([status, info]) => ({name: info.label, icon: 'flag', color: info.color, click: () => this.setStatus(row, status)})),
-                {name: 'Clear Status', icon: 'flag', click: () => this.setStatus(row, null)}
-            ]}, {name: 'Duplicate Skin', icon: 'content_copy', click: () => this.duplicateSkin(row)},
+        new Menu([{name: 'Duplicate Skin', icon: 'content_copy', click: () => this.duplicateSkin(row)},
+            {name: 'Status', icon: 'flag', children: [
+                ...sortedStatuses(this.manager.state.settings.customStatuses).map(info => ({name:info.label,icon:'flag',color:info.color,click:()=>this.setStatus(row,info.id)})),
+                {name:'Custom Status',icon:'add',click:()=>this.createCustomStatus()}
+            ]},
             {name: 'Open File', icon: 'description', click: () => this.run(() => this.desktop.open(row.filename))},
-            {name: 'Reveal File', icon: 'folder_open', click: () => {
+            {name: 'Reveal in File Explorer', icon: 'folder_open', click: () => {
                 if (typeof Blockbench.showItemInFolder === 'function') Blockbench.showItemInFolder(row.filename);
                 else this.run(() => this.desktop.open(this.desktop.path.dirname(row.filename), true));
-            }}]).open(event);
+            }}, {name:'Delete Skin',icon:'delete',click:()=>this.deleteSkin(row)}]).open(event);
     }
     changeTheme(theme) {
         if (theme !== 'Blockbench' && !Object.hasOwn(THEMES, theme)) return;
@@ -1033,14 +1203,14 @@ class Manager {
         this.selection = [];
         this.anchorKey = '';
         this.duplicateSource = null;
-        this.state = {settings: settingsFrom(), update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
+        this.state = {lodFiles:[],collectionOptions:[], settings: settingsFrom(), update: null, ready: false, dirty: false, active: false, root: '', folder: 'Example', namespace: 'example',
             gunPackItems: [], gunPackDirectory: '', gunPackMessage: '', gunPackWarnings: [], packMetadata: {title: 'Pack Name'}, directory: '', rows: [], selectedKey: '', selectedKeys: [], duplicatePending: false, mixed: {}, changedFields: [], draft: emptyDraft(), search: '', rarityFilter: '', collectionFilter: '',
             health: {status: 'checking', errors: 0, warnings: 0}, customModel: false, rarities: defaultRarities(), sortColumn: 'gun', descending: false, missing: false, warnings: [], previews: [], notice: '', theme: 'Blockbench', weaponNames: {}};
     }
     attach(repository, result = repository.discover()) {
         this.repository = repository;
         const p = repository.paths;
-        Object.assign(this.state, {ready: true, root: p.root, folder: p.folder, namespace: p.namespace, directory: p.registryDirectory,
+        Object.assign(this.state, {collectionOptions:[],ready: true, root: p.root, folder: p.folder, namespace: p.namespace, directory: p.registryDirectory,
             rows: result.rows, warnings: result.warnings, missing: result.missing, rarities: result.rarities || defaultRarities(), rarityFilter: '', collectionFilter: '', health: {status: 'checking', errors: 0, warnings: 0}});
         this.clear(false);
     }
@@ -1186,8 +1356,8 @@ class Manager {
             const values = {gun, name: row.skin.name ?? '', rarity: row.skin.rarity ?? '',
                 collection: row.skin.collection ?? '', is_new: row.skin.is_new ? 1 : 0, file: this.repository.paths.path.basename(row.filename)};
             const rarityRank = rarityRanks.get(String(row.skin.rarity ?? '').trim().toLowerCase()) ?? rarityRanks.size;
-            const status = rowStatus(s.packMetadata, this.repository.paths, row);
-            const progressRank = status ? ['Planned', 'WIP', 'Complete'].indexOf(status.label) : 3;
+            const status = rowStatus(s.packMetadata, this.repository.paths, row, s.settings.customStatuses);
+            const progressRank = status ? status.order : 0;
             const primary = s.sortColumn === 'rarity' ? rarityRank
                 : s.sortColumn === 'progress' ? progressRank : String(values[s.sortColumn]).toLowerCase();
             return [primary, gun, String(row.skin.name ?? '').toLowerCase()];
@@ -1212,17 +1382,45 @@ module.exports = {Manager, BULK_FIELDS};
 'use strict';
 const {isObject} = require("src/domain/skin.js");
 const {loadPackMetadata, savePackMetadata} = require("src/storage/pack-metadata.js");
-const STATUSES = Object.freeze({wip: {label: 'WIP', color: '#E9B949'}, planned: {label: 'Planned', color: '#E05A5A'}, complete: {label: 'Complete', color: '#43B873'}});
+const STATUSES = Object.freeze({planned: {label: 'Planned', color: '#E05A5A', order:5}, wip: {label: 'WIP', color: '#E9B949', order:10}, complete: {label: 'Complete', color: '#43B873', order:20}});
+const UNASSIGNED = Object.freeze({id:null,label:'Unassigned',color:'#777777',order:0});
+function normalizeCustomStatuses(value) {
+    const result=[],ids=new Set(Object.keys(STATUSES)),names=new Set(['unassigned',...Object.values(STATUSES).map(info=>info.label.toLowerCase())]);
+    for(const status of Array.isArray(value)?value:[]) {
+        if(!isObject(status) || typeof status.id!=='string' || !/^custom_[a-z0-9_]+$/.test(status.id) || ids.has(status.id)
+            || typeof status.label!=='string' || !status.label.trim() || status.label.trim().length>64 || names.has(status.label.trim().toLowerCase())
+            || typeof status.color!=='string' || !/^#[a-f0-9]{6}$/i.test(status.color) || !Number.isSafeInteger(status.order)) continue;
+        result.push({id:status.id,label:status.label.trim(),color:status.color.toUpperCase(),order:status.order});
+        ids.add(status.id);names.add(status.label.trim().toLowerCase());
+    }
+    return result;
+}
+function availableStatuses(custom=[]) { return {...STATUSES,...Object.fromEntries(normalizeCustomStatuses(custom).map(status=>[status.id,status]))}; }
+function sortedStatuses(custom=[]) {
+    return [UNASSIGNED,...Object.entries(availableStatuses(custom)).map(([id,info])=>({...info,id}))]
+        .sort((a,b)=>a.order-b.order || a.label.localeCompare(b.label) || String(a.id).localeCompare(String(b.id)));
+}
+function newCustomStatus(values,custom=[]) {
+    const label=String(values.name || '').trim(),order=String(values.order ?? '').trim();
+    const color=typeof values.color==='string'?values.color:values.color && values.color.toHexString();
+    if(!label || label.length>64) throw new Error('Enter a status name from 1 to 64 characters.');
+    if(sortedStatuses(custom).some(status=>status.label.toLowerCase()===label.toLowerCase())) throw new Error('A status with that name already exists.');
+    if(!/^-?[0-9]+$/.test(order) || !Number.isSafeInteger(Number(order))) throw new Error('Sort order must be a whole number within the safe range.');
+    if(typeof color!=='string' || !/^#[a-f0-9]{6}$/i.test(color)) throw new Error('Choose a six-digit flag color.');
+    let id;do {id='custom_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,10);} while(custom.some(status=>status.id===id));
+    return {id,label,color:color.toUpperCase(),order:Number(order)};
+}
 function statusKey(paths, row) {
     return JSON.stringify([paths.path.relative(paths.pack, row.filename).replace(/\\/g, '/'), String(row.skin.id ?? '')]);
 }
-function rowStatus(metadata, paths, row) {
+function rowStatus(metadata, paths, row, custom=[]) {
     const statuses = metadata.skin_statuses;
     const value = isObject(statuses) ? statuses[statusKey(paths, row)] : null;
-    return typeof value === 'string' && Object.hasOwn(STATUSES, value) ? STATUSES[value] : null;
+    const available=availableStatuses(custom);
+    return typeof value === 'string' && Object.hasOwn(available, value) ? available[value] : null;
 }
-function saveStatuses(fs, paths, rows, status) {
-    if (status !== null && !Object.hasOwn(STATUSES, status)) throw new Error('Choose a supported skin status.');
+function saveStatuses(fs, paths, rows, status, custom=[]) {
+    if (status !== null && !Object.hasOwn(availableStatuses(custom), status)) throw new Error('Choose a supported skin status.');
     const metadata = loadPackMetadata(fs, paths);
     if (metadata.skin_statuses !== undefined && !isObject(metadata.skin_statuses)) throw new Error('Pack skin_statuses must be a JSON object.');
     const statuses = {...metadata.skin_statuses};
@@ -1233,7 +1431,7 @@ function saveStatuses(fs, paths, rows, status) {
     }
     return savePackMetadata(fs, paths, {skin_statuses: statuses});
 }
-module.exports = {STATUSES, statusKey, rowStatus, saveStatuses};
+module.exports = {STATUSES, UNASSIGNED, normalizeCustomStatuses, availableStatuses, sortedStatuses, newCustomStatus, statusKey, rowStatus, saveStatuses};
 
 },
 "src/domain/skin.js": function(module, exports, require) {
@@ -1679,13 +1877,30 @@ function isDirectory(fs, filename) {
     try { return fs.statSync(filename).isDirectory(); } catch { return false; }
 }
 
-module.exports = {readJSON, atomicJSON, isFile, isDirectory};
+// Blockbench's scoped filesystem has Dirent inspection but no lstatSync/realpathSync.
+function assertNoSymbolicLinks(fs, path, root, filename) {
+    const relative=path.relative(root,filename);
+    if(relative==='..' || relative.startsWith('..'+path.sep) || path.isAbsolute(relative))throw new Error('File path is outside the selected pack.');
+    const same=(a,b)=>path.sep==='\\'?a.toLowerCase()===b.toLowerCase():a===b;
+    let current=root;
+    for(const part of [null,...relative.split(path.sep).filter(Boolean)]) {
+        if(part!==null)current=path.join(current,part);
+        const parent=path.dirname(current);
+        if(!isDirectory(fs,parent))break;
+        const entry=fs.readdirSync(parent,{withFileTypes:true}).find(entry=>same(entry.name,path.basename(current)));
+        if(!entry)break;
+        if(entry.isSymbolicLink())throw new Error('Cannot modify files through symbolic links: '+current);
+    }
+}
+
+module.exports = {readJSON, atomicJSON, isFile, isDirectory, assertNoSymbolicLinks};
 
 },
 "src/domain/preferences.js": function(module, exports, require) {
 'use strict';
 const {THEMES} = require("src/domain/constants.js");
 const {isObject} = require("src/domain/skin.js");
+const {normalizeCustomStatuses} = require("src/domain/status.js");
 const SETTINGS = 'mcpskins_asset_manager.settings.v1';
 const themes = ['Blockbench', ...Object.keys(THEMES)];
 const PREVIEW_SIZES = {small:160, medium:256, large:384};
@@ -1695,17 +1910,17 @@ function settingsFrom(value) {
     const assets = isObject(source.assets) ? source.assets : {};
     const text = key => typeof defaults[key] === 'string' ? defaults[key] : '';
     const bool = (object,key,fallback) => typeof object[key] === 'boolean' ? object[key] : fallback;
-    return {defaults:{rarity:text('rarity') || 'common', collection:text('collection'), author:text('author'), is_new:bool(defaults,'is_new',true), unlocked:bool(defaults,'unlocked',false)},
+    return {customStatuses:normalizeCustomStatuses(source.customStatuses),defaults:{rarity:text('rarity') || 'common', collection:text('collection'), author:text('author'), is_new:bool(defaults,'is_new',true), unlocked:bool(defaults,'unlocked',false)},
         assets:{createSpecular:bool(assets,'createSpecular',true),createNormal:bool(assets,'createNormal',true)},
         appearance:{compact:bool(appearance,'compact',false), listHeight:Number.isFinite(appearance.listHeight) && appearance.listHeight >= 40 ? Math.min(1200,Math.round(appearance.listHeight)) : 0, previewSize:typeof appearance.previewSize === 'string' && Object.hasOwn(PREVIEW_SIZES,appearance.previewSize) ? appearance.previewSize : 'medium',theme:themes.includes(appearance.theme) ? appearance.theme : 'Blockbench'},
-        health:{live:bool(health,'live',true),missingHud:bool(health,'missingHud',true),missingIcon:bool(health,'missingIcon',true),missingMaps:bool(health,'missingMaps',true),collections:bool(health,'collections',true)}};
+        health:{live:bool(health,'live',true),skipLowOrder:bool(health,'skipLowOrder',true),missingHud:bool(health,'missingHud',true),missingIcon:bool(health,'missingIcon',true),missingMaps:bool(health,'missingMaps',true),collections:bool(health,'collections',true)}};
 }
 module.exports = {SETTINGS, themes, PREVIEW_SIZES, settingsFrom};
 
 },
 "src/version.js": function(module, exports, require) {
 'use strict';
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 const PLUGIN_TITLE = 'MCPSkins Manager v' + VERSION;
 module.exports = {VERSION, PLUGIN_TITLE};
 
@@ -2390,6 +2605,7 @@ class PackPaths {
         if (!validComponent(folder) || !validComponent(namespace)) throw new Error('Pack folder and namespace must be single folder components.');
         this.path = path;
         this.modelReferences = {};
+        this.lodReferences = {};
         this.root = path.resolve(root);
         this.folder = folder;
         this.namespace = namespace;
@@ -2593,7 +2809,7 @@ class GunPackCatalog {
         if (!model || !texture) throw new Error((kind === 'attachment' ? 'This attachment has no standalone model and UV texture to open. ' : 'Item display must define a model and texture. ') + displayResource);
         const texturePath = resourcePath(display.texture, 'textures', '.png');
         const read = entry => entry ? this.read(entry) : null;
-        return {modelRef: display.model, editorOnly, source: index.source.name, model: () => read(model), texture: () => read(texture),
+        return {modelRef: display.model, lodModelRef:kind==='gun' && display.lod ? display.lod.model || null : null, editorOnly, source: index.source.name, model: () => read(model), texture: () => read(texture),
             normal: () => read(this.select(texturePath.slice(0, -4) + '_n.png', texture.source.id, true)),
             specular: () => read(this.select(texturePath.slice(0, -4) + '_s.png', texture.source.id, true)),
             icon: () => read(get(editorOnly ? display.slot_texture || display.slot : display.slot, 'textures', '.png', true)),
@@ -2731,145 +2947,322 @@ class ZipPack {
 module.exports = {ArchiveCache, ZipPack, safeEntry, crc32, MAX_ENTRY};
 
 },
-"src/storage/registry.js": function(module, exports, require) {
+"src/assets/pack-export.js": function(module, exports, require) {
 'use strict';
-const {isObject, clone, validateRegistry, baseWeapon, equalJSON, buildEntry, draftFromRow, BASE_KEYS, itemKind} = require("src/domain/skin.js");
-const {assertVariants, renameVariantLinks} = require("src/domain/variants.js");
-const {duplicateAssets} = require("src/assets/preparation.js");
-const {scanRarities} = require("src/storage/rarities.js");
-const {readJSON, atomicJSON, isDirectory} = require("src/storage/files.js");
-
-class RegistryRepository {
-    constructor(fs, paths) { this.fs = fs; this.paths = paths; }
-    read(filename) { return validateRegistry(readJSON(this.fs, filename), this.paths.path.basename(filename)); }
-    discover() {
-        const {rarities, warnings: rarityWarnings} = scanRarities(this.fs, this.paths);
-        const rows = [], warnings = rarityWarnings.map(warning => warning.message);
-        const directory = this.paths.registryDirectory;
-        if (!isDirectory(this.fs, directory)) return {rows, warnings, rarities, missing: true};
-        const files = this.fs.readdirSync(directory).filter(n => n.endsWith('.json'))
-            .sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0);
-        for (const name of files) {
-            const filename = this.paths.path.join(directory, name);
-            try {
-                const raw = readJSON(this.fs, filename);
-                if (!name.endsWith('_skins.json') && (!isObject(raw) || !Object.values(BASE_KEYS).some(key => Object.hasOwn(raw, key)))) continue;
-                const data = validateRegistry(raw, name);
-                data.skins.forEach((skin, index) => {
-                    if (isObject(skin)) rows.push({key: `${filename}\0${index}`, filename, data, index, skin: clone(skin)});
-                });
-            } catch (error) { warnings.push(error.message); }
-        }
-        return {rows, warnings, rarities, missing: false};
-    }
-    saveBatch(rows, draft, changedFields) {
-        const {rarities} = scanRarities(this.fs, this.paths);
-        const allowed = {rarity: 'rarity', color: 'label_color', collection: 'collection', description: 'description',
-            author: 'author', subtitle: 'subtitle', limited: 'limited', is_new: 'is_new', locked_text: 'locked_text', unlocked: 'unlocked', include_weight: 'weight', weight: 'weight'};
-        const fields = [...new Set(changedFields)];
-        if (fields.some(key => !Object.hasOwn(allowed, key))) throw new Error('Identity fields cannot be edited in bulk.');
-        const patch = {};
-        for (const key of fields) {
-            let value = draft[key];
-            if (['collection', 'description', 'locked_text', 'author', 'subtitle'].includes(key)) {
-                value = value.trim();
-                if (['collection', 'description'].includes(key) && !value) throw new Error('Collection and description are required.');
-            }
-            if (key === 'rarity') {
-                value = value.toLowerCase();
-                if (!Object.hasOwn(rarities, value)) throw new Error('Choose a supported rarity.');
-            }
-            if (key === 'color') {
-                if (!/^#[0-9a-f]{6}$/i.test(value.trim())) throw new Error('Use a six-digit label color.');
-                value = '0x' + value.trim().slice(1).toUpperCase();
-            }
-            if (key === 'include_weight' || key === 'weight') {
-                if (draft.include_weight) {
-                    const text = String(draft.weight).trim();
-                    if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(Number(text)) || Number(text) < 1) throw new Error('Weight must be a positive safe whole number.');
-                    value = Number(text);
-                } else value = undefined;
-            }
-            if ((['locked_text', 'author', 'subtitle'].includes(key) && !value) || (['unlocked', 'limited'].includes(key) && !value)) value = undefined;
-            patch[allowed[key]] = value;
-        }
-        const groups = new Map();
-        for (const row of rows) {
-            if (!groups.has(row.filename)) {
-                const data = this.read(row.filename);
-                groups.set(row.filename, {data, original: clone(data)});
-            }
-            const {data} = groups.get(row.filename);
-            if (baseWeapon(data) !== baseWeapon(row.data) || !equalJSON(data.skins[row.index], row.skin)) throw new Error('A selected entry changed on disk. Refresh Files before saving.');
-            for (const [key, value] of Object.entries(patch)) {
-                if (value === undefined) delete data.skins[row.index][key];
-                else data.skins[row.index][key] = value;
+const {isObject,clone,baseWeapon,itemKind,validateRegistry,validWeapon} = require("src/domain/skin.js");
+const {rowStatus,statusKey} = require("src/domain/status.js");
+const {safeEntry} = require("src/gunpacks/archive.js");
+const DATA_TYPES=new Set(['skin_rarities','skin_lang','collection_cases','shop_entries','shop_tabs','recipes','recipe','loot_tables','loot_table','tags','advancements','advancement','predicates','predicate','item_modifiers','item_modifier','functions','function']);
+const encode=value=>new TextEncoder().encode(JSON.stringify(value,null,2)+'\n');
+function walkPack(fs,paths) {
+    const files=new Map();
+    const walk=(directory,prefix='',depth=0)=>{
+        if(depth>48)throw new Error('Pack folders are nested too deeply to export.');
+        for(const item of fs.readdirSync(directory,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))) {
+            const name=prefix+item.name,filename=paths.path.join(directory,item.name);
+            if(!safeEntry(name))throw new Error('Unsafe pack path: '+name);
+            if(item.isSymbolicLink())throw new Error('Cannot export a symbolic link: '+name);
+            if(item.isDirectory())walk(filename,name+'/',depth+1);
+            else if(item.isFile()) {
+                const stat=fs.statSync(filename);if(stat.size>256*1024*1024)throw new Error('File exceeds the 256 MB export limit: '+name);
+                const signature=value=>value.size+':'+value.mtimeMs+':'+value.ctimeMs;
+                const expected=signature(stat);
+                files.set(name,{name,filename,size:stat.size,read:()=>{
+                    if(signature(fs.statSync(filename))!==expected)throw new Error('A pack file changed. Reopen Export Pack: '+name);
+                    const bytes=fs.readFileSync(filename);
+                    if(signature(fs.statSync(filename))!==expected)throw new Error('A pack file changed while exporting: '+name);
+                    return bytes;
+                }});
+                if(files.size>65000)throw new Error('This pack has too many files to export.');
             }
         }
-        const written = [];
+    };
+    walk(paths.pack);return files;
+}
+function exportInventory(fs,paths,metadata={},customStatuses=[]) {
+    const files=walkPack(fs,paths),registries=[],rows=[],errors=[];
+    for(const [name,file] of files) if(/^data\/[^/]+\/skins\/.+\.json$/.test(name)) {
         try {
-            if (fields.length) for (const [filename, group] of groups) {
-                atomicJSON(this.fs, filename, group.data);
-                written.push(filename);
-            }
-        } catch (error) {
-            const failures = [];
-            for (const filename of written.reverse()) {
-                try { atomicJSON(this.fs, filename, groups.get(filename).original); }
-                catch { failures.push(filename); }
-            }
-            if (failures.length) throw new Error(`${error.message} Some files could not be restored: ${failures.join(', ')}. Refresh Files to inspect them.`);
-            throw error;
-        }
-        return {count: rows.length};
+            const data=validateRegistry(JSON.parse(file.read().toString('utf8').replace(/^\uFEFF/,'')),name);
+            if(!validWeapon(baseWeapon(data)||''))throw new Error('Invalid base weapon ID.');
+            const record={name,file,data};registries.push(record);
+            data.skins.forEach((skin,index)=>{
+                if(!isObject(skin) || typeof skin.id!=='string' || !skin.id)throw new Error('Invalid skin entry.');
+                const row={key:file.filename+'\0'+index,filename:file.filename,data,index,skin:clone(skin)};
+                const status=rowStatus(metadata,paths,row,customStatuses);
+                rows.push({...row,collection:typeof skin.collection==='string'?skin.collection.trim():'',statusId:status?metadata.skin_statuses[statusKey(paths,row)]:'',statusOrder:status?.order || 0,statusLabel:status?.label || 'Unassigned',statusColor:status?.color || '#777777',weapon:baseWeapon(data)});
+            });
+        } catch(error){errors.push(name+': '+error.message);}
     }
-    save(draft, selected = null, defaultPrefix = null, duplicate = null) {
-        const {rarities} = scanRarities(this.fs, this.paths);
-        const {weapon, entry} = buildEntry(draft, selected ? selected.skin : duplicate ? duplicate.skin : null, defaultPrefix, rarities);
-        let filename = selected ? selected.filename : this.paths.registry(weapon, draft.kind);
-        if (!selected && isDirectory(this.fs, this.paths.registryDirectory)) {
-            const matches = [];
-            for (const name of this.fs.readdirSync(this.paths.registryDirectory).filter(name => name.endsWith('.json'))) {
-                const candidate = this.paths.path.join(this.paths.registryDirectory, name);
-                try {
-                    const existing = this.read(candidate);
-                    if (baseWeapon(existing) === weapon && itemKind(existing) === draft.kind) matches.push(candidate);
-                } catch { /* Unrelated invalid files are reported by discovery. */ }
-            }
-            if (matches.length > 1) throw new Error('Multiple registry files declare this item. Merge them before adding another skin.');
-            if (matches.length) filename = matches[0];
+    return {files,registries,rows,errors};
+}
+function exportFilename(title,author,version) {
+    const part=value=>String(value||'').trim().replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').replace(/[. ]+$/g,'');
+    return [part(title)||'Pack',part(author)||'Author',part(version)||'1.0.0'].join('_')+'.zip';
+}
+function validateFilename(name) {
+    const filename=String(name||'').trim();
+    if(!filename || /[<>:"/\\|?*\x00-\x1f]/.test(filename) || /[. ]$/.test(filename) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(filename))throw new Error('Enter a valid ZIP filename without folders or reserved characters.');
+    return /\.zip$/i.test(filename)?filename:filename+'.zip';
+}
+function runtimePlan(inventory,selected) {
+    if(inventory.errors.length)throw new Error('Fix unreadable skin registries before Export Pack, or use Export Full. '+inventory.errors[0]);
+    const keys=new Set(selected),chosen=inventory.rows.filter(row=>keys.has(row.key));
+    if(!chosen.length)throw new Error('Select at least one skin to export.');
+    if(chosen.length!==keys.size)throw new Error('The skin selection is no longer available. Reopen Export Pack.');
+    const selectedIds=new Set();
+    for(const row of chosen) {
+        if(selectedIds.has(row.skin.id))throw new Error('Selected skins have a duplicate ID: '+row.skin.id);
+        selectedIds.add(row.skin.id);
+    }
+    const files=inventory.files,output=new Map(),dependencies=[];
+    const add=name=>{if(files.has(name) && !output.has(name))output.set(name,files.get(name));};
+    const json=(name,data)=>{output.set(name,{name,read:()=>encode(data)});dependencies.push(data);};
+    for(const registry of inventory.registries) {
+        const selectedRows=chosen.filter(row=>row.filename===registry.file.filename);if(!selectedRows.length)continue;
+        const allowed=new Set(selectedRows.map(row=>row.skin.id)),data=clone(registry.data);
+        data.skins=selectedRows.map(row=>{
+            const skin=clone(row.skin);
+            if(Array.isArray(skin.variants))skin.variants=skin.variants.filter(id=>allowed.has(id));
+            if(Array.isArray(skin.levels))skin.levels=skin.levels.filter(level=>!isObject(level) || allowed.has(level.variant));
+            return skin;
+        });
+        json(registry.name,data);
+    }
+    const pngs=new Set();
+    for(const row of chosen) {
+        const id=row.skin.id,colon=id.indexOf(':'),namespace=colon<0?'mcpskins':id.slice(0,colon),skinPath=colon<0?id:id.slice(colon+1);
+        const weapon=row.weapon.replace(':','/');
+        if(!/^[a-z0-9_.-]+$/.test(namespace) || !safeEntry(skinPath) || !safeEntry(weapon))throw new Error('Unsafe skin asset ID: '+id);
+        const base='assets/'+namespace+'/textures/skins/'+weapon+'/'+skinPath;
+        const kinds=itemKind(row.data)==='gun'?['','_icon','_hud','_hud_empty','_lod']:['','_icon'];
+        for(const kind of kinds) for(const map of ['','_n','_s'])pngs.add(base+kind+map+'.png');
+        if(itemKind(row.data)==='gun')add('assets/'+namespace+'/animations/skins/'+weapon+'/'+skinPath+'.animation.json');
+        const ending='__skin_'+id.replace(/[:/]/g,'_')+'.json';
+        for(const name of files.keys())if(/^assets\/[^/]+\/geo_models\//.test(name) && name.endsWith(ending))add(name);
+    }
+    for(const png of pngs)if(files.has(png)){add(png);add(png+'.mcmeta');}
+    for(const [name,file] of files) {
+        const parts=name.split('/');if(parts[0]!=='data' || !DATA_TYPES.has(parts[2]))continue;
+        if(name.endsWith('.json')) {
+            let data;try{data=JSON.parse(file.read().toString('utf8').replace(/^\uFEFF/,''));}catch(error){throw new Error('Invalid runtime data: '+name);}
+            add(name);dependencies.push(data);
+        } else if(['function','functions'].includes(parts[2]) && name.endsWith('.mcfunction'))add(name);
+    }
+    // Follow local resource references from case icons, shop entries, and included models.
+    const queue=[...output.keys()].filter(name=>name.startsWith('assets/') && name.endsWith('.json')),seen=new Set();
+    const resource=value=>{
+        if(typeof value!=='string' || !/^[a-z0-9_.-]+:[a-z0-9_./-]+$/.test(value))return;
+        const [namespace,path]=value.split(':');if(!safeEntry(path))return;
+        const candidates=/\.(png|json|ogg|mcmeta)$/.test(path)?[path]:[path,path+'.json',path+'.png','textures/'+path+'.png','models/'+path+'.json','models/item/'+path+'.json','sounds/'+path+'.ogg'];
+        for(const candidate of candidates) {
+            const name='assets/'+namespace+'/'+candidate;
+            if(!/\.(png|json|ogg|mcmeta)$/.test(name))continue;
+            if(files.has(name) && !output.has(name)){add(name);if(name.endsWith('.png'))add(name+'.mcmeta');if(name.endsWith('.json'))queue.push(name);}
         }
-        let data;
-        if (selected) {
-            data = this.read(filename);
-            if (selected.index >= data.skins.length || !equalJSON(data.skins[selected.index], selected.skin)) {
-                throw new Error('This entry changed on disk. Refresh Files before saving.');
-            }
-            if (baseWeapon(data) !== weapon) throw new Error('The weapon ID cannot change during editing.');
-        } else if (this.fs.existsSync(filename)) {
-            data = this.read(filename);
-            if (baseWeapon(data) !== weapon) throw new Error(`Weapon mismatch: this file belongs to ${baseWeapon(data)}.`);
-        } else {
-            if (!Object.hasOwn(BASE_KEYS, draft.kind)) throw new Error('Choose a supported item type.');
-            data = {[BASE_KEYS[draft.kind]]: weapon, skins: []};
+    };
+    const visit=value=>{if(typeof value==='string')resource(value);else if(Array.isArray(value))value.forEach(visit);else if(isObject(value))Object.values(value).forEach(visit);};
+    dependencies.forEach(visit);
+    for(let index=0;index<queue.length;index++) {
+        const name=queue[index];if(seen.has(name))continue;seen.add(name);
+        try {visit(JSON.parse(files.get(name).read().toString('utf8').replace(/^\uFEFF/,'')));}catch(error){throw new Error('Invalid referenced asset: '+name);}
+    }
+    return {entries:[...output.values()].sort((a,b)=>a.name.localeCompare(b.name)),skins:chosen.length,omitted:files.size-output.size};
+}
+module.exports={walkPack,exportInventory,exportFilename,validateFilename,runtimePlan};
+
+},
+"src/state/export.js": function(module, exports, require) {
+'use strict';
+const {exportFilename} = require("src/assets/pack-export.js");
+class ExportSelection {
+    constructor(inventory,metadata={}) {
+        this.inventory=inventory;this.metadata=metadata;
+        this.state={version:typeof metadata.version==='string'?metadata.version:'1.0.0',filename:'',selected:inventory.rows.map(row=>row.key),search:'',busy:false,progress:'',error:'',notice:''};
+        this.state.filename=this.suggestedName();
+    }
+    suggestedName() {return exportFilename(this.metadata.title,this.metadata.author,this.state.version);}
+    version(value) {const previous=this.suggestedName();this.state.version=value;if(this.state.filename===previous)this.state.filename=this.suggestedName();}
+    all(checked) {this.state.selected=checked?this.inventory.rows.map(row=>row.key):[];}
+    toggle(rows,checked) {const selected=new Set(this.state.selected);for(const row of rows){if(checked)selected.add(row.key);else selected.delete(row.key);}this.state.selected=[...selected];}
+    groups(kind) {
+        const groups=new Map();
+        for(const row of this.inventory.rows) {
+            const key=kind==='collection'?row.collection.toLowerCase():row.statusId;
+            if(!groups.has(key))groups.set(key,{key,label:kind==='collection'?row.collection || '(No collection)':row.statusLabel,color:kind==='collection'?'':row.statusColor,order:row.statusOrder || 0,rows:[]});
+            groups.get(key).rows.push(row);
         }
-        if (selected && itemKind(data) !== draft.kind) throw new Error('The item type cannot change in an existing registry.');
-        const index = selected ? selected.index : data.skins.length;
-        if (data.skins.some((skin, i) => isObject(skin) && skin.id === entry.id && i !== index)) {
-            throw new Error(`${entry.id} already exists in ${this.paths.path.basename(filename)}.`);
-        }
-        data.skins[index] = entry;
-        if (selected) renameVariantLinks(data.skins, selected.skin.id, entry.id);
-        assertVariants(data.skins, [entry.id, ...(selected ? [selected.skin.id] : [])]);
-        this.fs.mkdirSync(this.paths.registryDirectory, {recursive: true});
-        const created = duplicate ? duplicateAssets(this.fs, this.paths, draftFromRow(duplicate), draft) : [];
-        try { atomicJSON(this.fs, filename, data); }
-        catch (error) { for (const file of created) this.fs.unlinkSync(file); throw error; }
-        return {filename, id: entry.id};
+        return [...groups.values()].sort((a,b)=>(kind==='status'?a.order-b.order:0) || a.label.localeCompare(b.label));
     }
 }
+module.exports={ExportSelection};
 
-module.exports = {RegistryRepository};
+},
+"src/ui/export.js": function(module, exports, require) {
+'use strict';
+function exportComponent(selection,exportPack) {
+    return {
+        data() {return {e:selection.state,inventory:selection.inventory};},
+        computed:{
+            collections(){return selection.groups('collection');},statuses(){return selection.groups('status');},
+            rows(){const term=this.e.search.trim().toLowerCase();return this.inventory.rows.filter(row=>(row.skin.name+' '+row.skin.id+' '+row.collection+' '+row.weapon).toLowerCase().includes(term));}
+        },
+        methods:{
+            checked(rows){return rows.length>0 && rows.every(row=>this.e.selected.includes(row.key));},
+            mixed(rows){return rows.some(row=>this.e.selected.includes(row.key)) && !this.checked(rows);},
+            toggleGroup(rows,event){selection.toggle(rows,event.target.checked);},all(value){selection.all(value);},
+            version(event){selection.version(event.target.value);},exportPack(full){return exportPack(full);}
+        },
+        template:`<section class="mcpskins-export">
+            <p>Exports saved files. Save painted textures and models in Blockbench before exporting.</p>
+            <div class="mcpskins-export-name"><label>Pack version<input :value="e.version" @input="version" :disabled="e.busy" placeholder="1.0.0"></label><label>ZIP filename<input v-model="e.filename" :disabled="e.busy" spellcheck="false"></label></div>
+            <p v-if="inventory.errors.length" class="mcpskins-health-warning">Some skin registries could not be read. Fix them before Export Pack. Export Full can still back up the pack.</p>
+            <div class="mcpskins-export-toolbar"><strong>{{e.selected.length}} of {{inventory.rows.length}} skins selected</strong><button type="button" :disabled="e.busy" @click="all(true)">Select All</button><button type="button" :disabled="e.busy" @click="all(false)">Select None</button></div>
+            <div class="mcpskins-export-selection"><aside>
+                <h3>Collections</h3><label v-for="group in collections" :key="'collection_'+group.key"><input type="checkbox" :disabled="e.busy" :checked="checked(group.rows)" :indeterminate.prop="mixed(group.rows)" @change="toggleGroup(group.rows,$event)">{{group.label}} <small>({{group.rows.length}})</small></label>
+                <h3>Status</h3><label v-for="group in statuses" :key="'status_'+group.key"><input type="checkbox" :disabled="e.busy" :checked="checked(group.rows)" :indeterminate.prop="mixed(group.rows)" @change="toggleGroup(group.rows,$event)"><span class="mcpskins-export-flag" :style="{color:group.color}">?</span>{{group.label}} <small>({{group.rows.length}})</small></label>
+            </aside><section><input type="search" v-model="e.search" placeholder="Search skins..." :disabled="e.busy" aria-label="Search export skins"><div class="mcpskins-export-skins"><label v-for="row in rows" :key="row.key"><input type="checkbox" :disabled="e.busy" :checked="e.selected.includes(row.key)" @change="toggleGroup([row],$event)"><span>{{row.skin.name || row.skin.id}}<small>{{row.weapon}} | {{row.collection || 'No collection'}} | {{row.statusLabel}}</small></span></label><p v-if="!rows.length">No skins found.</p></div></section></div>
+            <hr class="mcpskins-export-separator">
+            <p class="mcpskins-export-note"><strong>Export Pack</strong> includes selected skins and runtime files from assets/ and data/, including Collection Cases metadata. Editing models, frame workspaces, and unused images are omitted. Links to excluded variants are removed in the exported copy.</p>
+            <p class="mcpskins-export-note"><strong>Export Full</strong> backs up the entire pack, including all skins and project files, regardless of the selection above.</p>
+            <p v-if="e.error" class="mcpskins-health-error" role="alert">{{e.error}}</p><p v-if="e.progress || e.notice" role="status">{{e.progress || e.notice}}</p>
+            <div class="mcpskins-export-actions"><button type="button" :disabled="e.busy" @click="exportPack(true)">Export Full</button><button type="button" :disabled="e.busy || !e.selected.length || !!inventory.errors.length" @click="exportPack(false)">Export Pack</button></div>
+        </section>`
+    };
+}
+module.exports={exportComponent};
+
+},
+"src/integration/zip.js": function(module, exports, require) {
+'use strict';
+const {crc32,safeEntry} = require("src/gunpacks/archive.js");
+const MAX_ZIP_BYTES=512*1024*1024,MAX_SOURCE_BYTES=1024*1024*1024;
+function join(parts,length=parts.reduce((sum,part)=>sum+part.length,0)) {const output=new Uint8Array(length);let offset=0;for(const part of parts){output.set(part,offset);offset+=part.length;}return output;}
+async function createZip(entries,deflate,progress=()=>{},canceled=()=>false) {
+    if(entries.length>65000)throw new Error('This pack has too many files for a standard ZIP.');
+    const chunks=[],central=[],names=new Set(),encoder=new TextEncoder();let offset=0,sourceBytes=0;
+    for(let index=0;index<entries.length;index++) {
+        if(canceled())throw new Error('Export canceled.');
+        const entry=entries[index];if(!safeEntry(entry.name) || names.has(entry.name))throw new Error('Unsafe or duplicate ZIP path: '+entry.name);names.add(entry.name);
+        const name=encoder.encode(entry.name);if(name.length>65535)throw new Error('ZIP filename is too long.');
+        const bytes=await entry.read();sourceBytes+=bytes.length;
+        if(sourceBytes>MAX_SOURCE_BYTES)throw new Error('Pack source files exceed the 1 GB export limit.');
+        const compressed=deflate(bytes),payload=compressed.length<bytes.length?compressed:bytes,method=payload===bytes?0:8,crc=crc32(bytes);
+        const header=new Uint8Array(30+name.length),h=new DataView(header.buffer);h.setUint32(0,0x04034b50,true);h.setUint16(4,20,true);h.setUint16(6,0x800,true);h.setUint16(8,method,true);h.setUint16(12,33,true);h.setUint32(14,crc,true);h.setUint32(18,payload.length,true);h.setUint32(22,bytes.length,true);h.setUint16(26,name.length,true);header.set(name,30);
+        const record=new Uint8Array(46+name.length),r=new DataView(record.buffer);r.setUint32(0,0x02014b50,true);r.setUint16(4,0x314,true);r.setUint16(6,20,true);r.setUint16(8,0x800,true);r.setUint16(10,method,true);r.setUint16(14,33,true);r.setUint32(16,crc,true);r.setUint32(20,payload.length,true);r.setUint32(24,bytes.length,true);r.setUint16(28,name.length,true);r.setUint32(38,0o100644*65536,true);r.setUint32(42,offset,true);record.set(name,46);
+        chunks.push(header,payload);central.push(record);offset+=header.length+payload.length;
+        if(offset>MAX_ZIP_BYTES)throw new Error('Compressed pack exceeds the 512 MB export limit.');
+        progress(index+1,entries.length,entry.name);if(index%8===0)await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    const directory=join(central),end=new Uint8Array(22),view=new DataView(end.buffer);view.setUint32(0,0x06054b50,true);view.setUint16(8,entries.length,true);view.setUint16(10,entries.length,true);view.setUint32(12,directory.length,true);view.setUint32(16,offset,true);
+    if(canceled())throw new Error('Export canceled.');
+    if(offset+directory.length+22>MAX_ZIP_BYTES)throw new Error('Compressed pack exceeds the 512 MB export limit.');
+    return join([...chunks,directory,end]);
+}
+module.exports={createZip};
+
+},
+"src/assets/lod.js": function(module, exports, require) {
+'use strict';
+const {assetSelection} = require("src/assets/preparation.js");
+const {modelOutput,modelKey} = require("src/gunpacks/catalog.js");
+const {isObject} = require("src/domain/skin.js");
+const {isFile,readJSON,assertNoSymbolicLinks} = require("src/storage/files.js");
+const {parseJSONC} = require("src/gunpacks/jsonc.js");
+function lodReference(paths,draft,source=null) {
+    if(draft.kind!=='gun')return null;
+    if(source)return source.lodModelRef || null;
+    const key=modelKey(draft.weapon,draft.kind);
+    if(Object.hasOwn(paths.lodReferences,key))return paths.lodReferences[key];
+    const {gun}=assetSelection(paths,draft);
+    return draft.weapon.startsWith('tacz:')?'tacz:gun/lod/'+gun:null;
+}
+function pngDimensions(bytes,metadata=null) {
+    const signature=[137,80,78,71,13,10,26,10];
+    if(bytes.length<24 || signature.some((value,i)=>bytes[i]!==value) || String.fromCharCode(...bytes.slice(12,16))!=='IHDR')throw new Error('Invalid PNG header.');
+    const integer=offset=>bytes[offset]*16777216+bytes[offset+1]*65536+bytes[offset+2]*256+bytes[offset+3];
+    const width=integer(16),height=integer(20);if(!width || !height)throw new Error('Invalid PNG dimensions.');
+    if(metadata && metadata.animation!==undefined) {
+        const animation=metadata.animation;if(!isObject(animation))throw new Error('Invalid texture animation metadata.');
+        const frameWidth=animation.width ?? Math.min(width,height),frameHeight=animation.height ?? Math.min(width,height);
+        if(!Number.isSafeInteger(frameWidth) || !Number.isSafeInteger(frameHeight) || frameWidth<1 || frameHeight<1 || width%frameWidth || height%frameHeight)throw new Error('Animation frame dimensions do not divide the texture.');
+        const positive=value=>Number.isSafeInteger(value) && value>0;
+        if(animation.frametime!==undefined && !positive(animation.frametime))throw new Error('Invalid animation frame time.');
+        if(animation.interpolate!==undefined && typeof animation.interpolate!=='boolean')throw new Error('Invalid animation interpolation setting.');
+        const count=width/frameWidth*(height/frameHeight);
+        if(animation.frames!==undefined && (!Array.isArray(animation.frames) || !animation.frames.length || animation.frames.some(frame=>{
+            const index=isObject(frame)?frame.index:frame;
+            return !Number.isSafeInteger(index) || index<0 || index>=count || isObject(frame) && frame.time!==undefined && !positive(frame.time);
+        })))throw new Error('Invalid animation frame index or duration.');
+        return {width:frameWidth,height:frameHeight};
+    }
+    return {width,height};
+}
+function geometry(bytes) {
+    const data=parseJSONC(bytes.toString('utf8'));
+    if(!isObject(data) || !Array.isArray(data['minecraft:geometry']) || !data['minecraft:geometry'].length || data['minecraft:geometry'].some(part=>!isObject(part) || !Array.isArray(part.bones)))throw new Error('Expected a Bedrock geometry model with a bones list.');
+    return data;
+}
+function lodStatus(fs,paths,draft) {
+    if(draft.kind!=='gun')return [];
+    let selection;try{selection=assetSelection(paths,draft);}catch{return [];}
+    const texture=paths.path.join(selection.folder,selection.id+'_lod.png');let model=null,error='';
+    try{const reference=lodReference(paths,draft);if(reference)model=modelOutput(paths,reference,selection.id);}catch(problem){error=problem.message;}
+    return [['texture','LOD Texture',texture],['model','LOD Model',model]].map(([kind,label,filename])=>{
+        const row={kind,label,path:filename || '',filename:filename?paths.path.basename(filename):'LOD reference not available',status:'missing',message:'File does not exist.'};
+        if(!filename){row.status=error?'invalid':'missing';row.message=error || 'No LOD model reference is available. Scan the source gun pack to check LOD support.';return row;}
+        if(!fs.existsSync(filename))return row;
+        try {
+            if(!isFile(fs,filename))throw new Error('Expected a file.');
+            if(kind==='model')geometry(fs.readFileSync(filename));
+            else pngDimensions(fs.readFileSync(filename),isFile(fs,filename+'.mcmeta')?readJSON(fs,filename+'.mcmeta'):null);
+            row.status='valid';row.message='File exists and passed validation.';
+        }catch(problem){row.status='invalid';row.message=problem.message;}
+        return row;
+    });
+}
+function planLOD(fs,paths,draft,source=null) {
+    if(draft.kind!=='gun')throw new Error('LOD generation is available for guns.');
+    const {folder,id}=assetSelection(paths,draft),reference=lodReference(paths,draft,source);
+    if(!reference)throw new Error(source?'This weapon does not define an LOD model. No files were generated.':'No LOD model reference is available. Scan or open the source gun pack first.');
+    const destination=modelOutput(paths,reference,id),canonical=source && source.modelRef?modelOutput(paths,source.modelRef,id):paths.modelForSkin(draft.weapon,id,draft.kind);
+    const full=[canonical,paths.path.join(folder,id+'.geo.json'),paths.path.join(folder,id+'.json')].find(file=>file && isFile(fs,file));
+    const bytes=full?fs.readFileSync(full):source?source.model():null;
+    if(!bytes)throw new Error('Open and save the full model before generating LODs.');
+    geometry(bytes);
+    const files=[[destination,bytes]],sources=full?[full]:[];
+    for(const suffix of ['','_n','_s']) {
+        const input=paths.path.join(folder,id+suffix+'.png'),output=paths.path.join(folder,id+'_lod'+suffix+'.png');
+        if(!isFile(fs,input)){if(!suffix)throw new Error('Save the skin texture before generating LODs.');continue;}
+        const metadata=isFile(fs,input+'.mcmeta')?readJSON(fs,input+'.mcmeta'):null,pixels=fs.readFileSync(input);
+        pngDimensions(pixels,metadata);files.push([output,pixels]);sources.push(input);
+        if(metadata){files.push([output+'.mcmeta',fs.readFileSync(input+'.mcmeta')]);sources.push(input+'.mcmeta');}
+        else if(fs.existsSync(output+'.mcmeta'))files.push([output+'.mcmeta',null]);
+    }
+    return {reference,files,sources,existing:files.map(([file])=>file).filter(file=>fs.existsSync(file))};
+}
+function writeLOD(fs,paths,files) {
+    const staged=[],committed=[];
+    const safe=filename=>{
+        const relative=paths.path.relative(paths.pack,filename);
+        if(!relative || relative.startsWith('..'+paths.path.sep) || relative==='..' || paths.path.isAbsolute(relative))throw new Error('LOD output is outside the selected pack.');
+        assertNoSymbolicLinks(fs,paths.path,paths.pack,filename);
+    };
+    try {
+        for(const [filename,bytes] of files) {
+            safe(filename);if(fs.existsSync(filename) && !isFile(fs,filename))throw new Error('LOD destination is not a file: '+filename);
+            const before=isFile(fs,filename)?fs.readFileSync(filename):null;
+            fs.mkdirSync(paths.path.dirname(filename),{recursive:true});
+            if(bytes!==null)fs.writeFileSync(filename+'.lod.tmp',bytes,{flag:'wx'});
+            staged.push({filename,bytes,before});
+        }
+        for(const record of staged){if(record.bytes===null){if(record.before!==null)fs.unlinkSync(record.filename);}else fs.renameSync(record.filename+'.lod.tmp',record.filename);committed.push(record);}
+    }catch(error){
+        const failures=[];for(const record of committed.reverse())try{if(record.before===null)fs.unlinkSync(record.filename);else fs.writeFileSync(record.filename,record.before);}catch{failures.push(record.filename);}
+        throw new Error(error.message+(failures.length?' Could not restore: '+failures.join(', '):''));
+    }finally{for(const record of staged)if(record.bytes!==null && fs.existsSync(record.filename+'.lod.tmp'))fs.unlinkSync(record.filename+'.lod.tmp');}
+}
+module.exports={lodReference,pngDimensions,geometry,lodStatus,planLOD,writeLOD};
 
 },
 "src/assets/preparation.js": function(module, exports, require) {
@@ -2877,7 +3270,7 @@ module.exports = {RegistryRepository};
 const {basename, slugify, isObject} = require("src/domain/skin.js");
 const {readJSON, isFile, isDirectory} = require("src/storage/files.js");
 const {parseJSONC} = require("src/gunpacks/jsonc.js");
-const {modelOutput} = require("src/gunpacks/catalog.js");
+const {modelOutput,modelKey} = require("src/gunpacks/catalog.js");
 const {animationCopies} = require("src/assets/animation.js");
 
 function assetSelection(paths, draft) {
@@ -3021,7 +3414,7 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     const source = assetSelection(paths, sourceDraft), target = assetSelection(paths, targetDraft);
     if (source.folder !== target.folder || source.id === target.id) throw new Error('Choose a different skin ID for the duplicate.');
     const copies = [];
-    for (const extension of ['.json', '.geo.json', '.png', '_n.png', '_s.png', '_hud.png', '_icon.png', '_hud_empty.png', '_lod.png', '.png.mcmeta', '_n.png.mcmeta', '_s.png.mcmeta', '_hud.png.mcmeta', '_hud_empty.png.mcmeta', '_icon.png.mcmeta', '_lod.png.mcmeta']) {
+    for (const extension of ['.json', '.geo.json', '.png', '_n.png', '_s.png', '_hud.png', '_icon.png', '_hud_empty.png', '_lod.png', '_lod_n.png','_lod_s.png', '.png.mcmeta', '_n.png.mcmeta', '_s.png.mcmeta', '_hud.png.mcmeta', '_hud_empty.png.mcmeta', '_icon.png.mcmeta', '_lod.png.mcmeta','_lod_n.png.mcmeta','_lod_s.png.mcmeta']) {
         const from = paths.path.join(source.folder, source.id + extension), to = paths.path.join(target.folder, target.id + extension);
         if (fs.existsSync(to)) throw new Error(`Duplicate asset already exists: ${to}`);
         if (isFile(fs, from)) copies.push([from, to]);
@@ -3030,6 +3423,14 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
     const targetModel = paths.modelForSkin(targetDraft.weapon, target.id, targetDraft.kind);
     if (targetModel && fs.existsSync(targetModel)) throw new Error('Duplicate model already exists: ' + targetModel);
     if (sourceModel && targetModel && isFile(fs, sourceModel)) copies.push([sourceModel, targetModel]);
+    if(sourceDraft.kind==='gun') {
+        const key=modelKey(sourceDraft.weapon,sourceDraft.kind),reference=Object.hasOwn(paths.lodReferences,key)?paths.lodReferences[key]:sourceDraft.weapon.startsWith('tacz:')?'tacz:gun/lod/'+source.gun:null;
+        if(typeof reference==='string') {
+            const from=modelOutput(paths,reference,source.id),to=modelOutput(paths,reference,target.id);
+            if(fs.existsSync(to))throw new Error('Duplicate LOD model already exists: '+to);
+            if(isFile(fs,from))copies.push([from,to]);
+        }
+    }
     const frames = animationCopies(fs, paths, source, target);
     const created = [];
     try {
@@ -3043,6 +3444,147 @@ function duplicateAssets(fs, paths, sourceDraft, targetDraft) {
 }
 
 module.exports = {assetSelection, modelForWeapon, modelForEditing, prepareSkin, duplicateAssets};
+
+},
+"src/storage/registry.js": function(module, exports, require) {
+'use strict';
+const {isObject, clone, validateRegistry, baseWeapon, equalJSON, buildEntry, draftFromRow, BASE_KEYS, itemKind} = require("src/domain/skin.js");
+const {assertVariants, renameVariantLinks} = require("src/domain/variants.js");
+const {duplicateAssets} = require("src/assets/preparation.js");
+const {scanRarities} = require("src/storage/rarities.js");
+const {readJSON, atomicJSON, isDirectory} = require("src/storage/files.js");
+
+class RegistryRepository {
+    constructor(fs, paths) { this.fs = fs; this.paths = paths; }
+    read(filename) { return validateRegistry(readJSON(this.fs, filename), this.paths.path.basename(filename)); }
+    discover() {
+        const {rarities, warnings: rarityWarnings} = scanRarities(this.fs, this.paths);
+        const rows = [], warnings = rarityWarnings.map(warning => warning.message);
+        const directory = this.paths.registryDirectory;
+        if (!isDirectory(this.fs, directory)) return {rows, warnings, rarities, missing: true};
+        const files = this.fs.readdirSync(directory).filter(n => n.endsWith('.json'))
+            .sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0);
+        for (const name of files) {
+            const filename = this.paths.path.join(directory, name);
+            try {
+                const raw = readJSON(this.fs, filename);
+                if (!name.endsWith('_skins.json') && (!isObject(raw) || !Object.values(BASE_KEYS).some(key => Object.hasOwn(raw, key)))) continue;
+                const data = validateRegistry(raw, name);
+                data.skins.forEach((skin, index) => {
+                    if (isObject(skin)) rows.push({key: `${filename}\0${index}`, filename, data, index, skin: clone(skin)});
+                });
+            } catch (error) { warnings.push(error.message); }
+        }
+        return {rows, warnings, rarities, missing: false};
+    }
+    saveBatch(rows, draft, changedFields) {
+        const {rarities} = scanRarities(this.fs, this.paths);
+        const allowed = {rarity: 'rarity', color: 'label_color', collection: 'collection', description: 'description',
+            author: 'author', subtitle: 'subtitle', limited: 'limited', is_new: 'is_new', locked_text: 'locked_text', unlocked: 'unlocked', include_weight: 'weight', weight: 'weight'};
+        const fields = [...new Set(changedFields)];
+        if (fields.some(key => !Object.hasOwn(allowed, key))) throw new Error('Identity fields cannot be edited in bulk.');
+        const patch = {};
+        for (const key of fields) {
+            let value = draft[key];
+            if (['collection', 'description', 'locked_text', 'author', 'subtitle'].includes(key)) {
+                value = value.trim();
+                if (['collection', 'description'].includes(key) && !value) throw new Error('Collection and description are required.');
+            }
+            if (key === 'rarity') {
+                value = value.toLowerCase();
+                if (!Object.hasOwn(rarities, value)) throw new Error('Choose a supported rarity.');
+            }
+            if (key === 'color') {
+                if (!/^#[0-9a-f]{6}$/i.test(value.trim())) throw new Error('Use a six-digit label color.');
+                value = '0x' + value.trim().slice(1).toUpperCase();
+            }
+            if (key === 'include_weight' || key === 'weight') {
+                if (draft.include_weight) {
+                    const text = String(draft.weight).trim();
+                    if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(Number(text)) || Number(text) < 1) throw new Error('Weight must be a positive safe whole number.');
+                    value = Number(text);
+                } else value = undefined;
+            }
+            if ((['locked_text', 'author', 'subtitle'].includes(key) && !value) || (['unlocked', 'limited'].includes(key) && !value)) value = undefined;
+            patch[allowed[key]] = value;
+        }
+        const groups = new Map();
+        for (const row of rows) {
+            if (!groups.has(row.filename)) {
+                const data = this.read(row.filename);
+                groups.set(row.filename, {data, original: clone(data)});
+            }
+            const {data} = groups.get(row.filename);
+            if (baseWeapon(data) !== baseWeapon(row.data) || !equalJSON(data.skins[row.index], row.skin)) throw new Error('A selected entry changed on disk. Refresh Files before saving.');
+            for (const [key, value] of Object.entries(patch)) {
+                if (value === undefined) delete data.skins[row.index][key];
+                else data.skins[row.index][key] = value;
+            }
+        }
+        const written = [];
+        try {
+            if (fields.length) for (const [filename, group] of groups) {
+                atomicJSON(this.fs, filename, group.data);
+                written.push(filename);
+            }
+        } catch (error) {
+            const failures = [];
+            for (const filename of written.reverse()) {
+                try { atomicJSON(this.fs, filename, groups.get(filename).original); }
+                catch { failures.push(filename); }
+            }
+            if (failures.length) throw new Error(`${error.message} Some files could not be restored: ${failures.join(', ')}. Refresh Files to inspect them.`);
+            throw error;
+        }
+        return {count: rows.length};
+    }
+    save(draft, selected = null, defaultPrefix = null, duplicate = null) {
+        const {rarities} = scanRarities(this.fs, this.paths);
+        const {weapon, entry} = buildEntry(draft, selected ? selected.skin : duplicate ? duplicate.skin : null, defaultPrefix, rarities);
+        let filename = selected ? selected.filename : this.paths.registry(weapon, draft.kind);
+        if (!selected && isDirectory(this.fs, this.paths.registryDirectory)) {
+            const matches = [];
+            for (const name of this.fs.readdirSync(this.paths.registryDirectory).filter(name => name.endsWith('.json'))) {
+                const candidate = this.paths.path.join(this.paths.registryDirectory, name);
+                try {
+                    const existing = this.read(candidate);
+                    if (baseWeapon(existing) === weapon && itemKind(existing) === draft.kind) matches.push(candidate);
+                } catch { /* Unrelated invalid files are reported by discovery. */ }
+            }
+            if (matches.length > 1) throw new Error('Multiple registry files declare this item. Merge them before adding another skin.');
+            if (matches.length) filename = matches[0];
+        }
+        let data;
+        if (selected) {
+            data = this.read(filename);
+            if (selected.index >= data.skins.length || !equalJSON(data.skins[selected.index], selected.skin)) {
+                throw new Error('This entry changed on disk. Refresh Files before saving.');
+            }
+            if (baseWeapon(data) !== weapon) throw new Error('The weapon ID cannot change during editing.');
+        } else if (this.fs.existsSync(filename)) {
+            data = this.read(filename);
+            if (baseWeapon(data) !== weapon) throw new Error(`Weapon mismatch: this file belongs to ${baseWeapon(data)}.`);
+        } else {
+            if (!Object.hasOwn(BASE_KEYS, draft.kind)) throw new Error('Choose a supported item type.');
+            data = {[BASE_KEYS[draft.kind]]: weapon, skins: []};
+        }
+        if (selected && itemKind(data) !== draft.kind) throw new Error('The item type cannot change in an existing registry.');
+        const index = selected ? selected.index : data.skins.length;
+        if (data.skins.some((skin, i) => isObject(skin) && skin.id === entry.id && i !== index)) {
+            throw new Error(`${entry.id} already exists in ${this.paths.path.basename(filename)}.`);
+        }
+        data.skins[index] = entry;
+        if (selected) renameVariantLinks(data.skins, selected.skin.id, entry.id);
+        assertVariants(data.skins, [entry.id, ...(selected ? [selected.skin.id] : [])]);
+        this.fs.mkdirSync(this.paths.registryDirectory, {recursive: true});
+        const created = duplicate ? duplicateAssets(this.fs, this.paths, draftFromRow(duplicate), draft) : [];
+        try { atomicJSON(this.fs, filename, data); }
+        catch (error) { for (const file of created) this.fs.unlinkSync(file); throw error; }
+        return {filename, id: entry.id};
+    }
+}
+
+module.exports = {RegistryRepository};
 
 },
 "src/storage/rarities.js": function(module, exports, require) {
@@ -3084,6 +3626,329 @@ function scanRarities(fs, paths) {
     return {rarities, warnings, definitions};
 }
 module.exports = {scanRarities};
+
+},
+"src/storage/delete-skin.js": function(module, exports, require) {
+'use strict';
+const {readJSON,atomicJSON,isDirectory,isFile,assertNoSymbolicLinks} = require("src/storage/files.js");
+const {isObject,clone,equalJSON,baseWeapon,itemKind,draftFromRow} = require("src/domain/skin.js");
+const {assetSelection} = require("src/assets/preparation.js");
+const {scanCollections} = require("src/storage/collections.js");
+const {metadataFile} = require("src/storage/pack-metadata.js");
+const {statusKey} = require("src/domain/status.js");
+
+function assertInside(fs,paths,filename) {
+    const relative=paths.path.relative(paths.pack,filename);
+    if (!relative || relative==='..' || relative.startsWith('..'+paths.path.sep) || paths.path.isAbsolute(relative)) throw new Error('Deletion path is outside the selected pack.');
+    assertNoSymbolicLinks(fs,paths.path,paths.pack,filename);
+}
+function skinFiles(fs,paths,row) {
+    if(typeof row.skin.id!=='string' || !/^[a-z0-9_]+$/.test(row.skin.id)) throw new Error('Full Delete requires a valid skin ID. Use Delete Entry for an invalid entry.');
+    const draft=draftFromRow(row),{folder,id,gun}=assetSelection(paths,draft);
+    if (['','_geo','_n','_s','_icon','_hud','_hud_empty','_lod','_lod_n','_lod_s'].some(suffix=>id===gun+suffix)) throw new Error('This skin ID matches a default weapon asset name. Use Delete Entry to preserve shared default files.');
+    const scan=scanCollections(fs,paths);
+    if (scan.issues.some(issue=>issue.severity==='error' && paths.path.relative(paths.pack,issue.filename).split(paths.path.sep).includes('skins'))) throw new Error('Fix unreadable skin registries before Full Delete, or use Delete Entry.');
+    for (const registry of scan.registries) registry.data.skins.forEach((skin,index)=>{
+        if (isObject(skin) && skin.id===id && (registry.filename!==row.filename || index!==row.index)) throw new Error('Another skin uses this ID. Use Delete Entry to preserve shared files.');
+    });
+    const files=new Set(),directories=[],related=new Set();
+    const add=filename=>{
+        assertInside(fs,paths,filename); related.add(filename);
+        if (!fs.existsSync(filename)) return;
+        if (!isFile(fs,filename)) throw new Error('Expected an asset file: '+filename);
+        files.add(filename);
+    };
+    const walk=(directory,visit,owned=false,depth=0)=>{
+        assertInside(fs,paths,directory);
+        if (!fs.existsSync(directory)) return;
+        if (!isDirectory(fs,directory)) throw new Error('Expected an asset folder: '+directory);
+        if (depth>32) throw new Error('Asset folders are nested too deeply.');
+        if (owned) directories.push(directory);
+        for (const entry of fs.readdirSync(directory,{withFileTypes:true})) {
+            const filename=paths.path.join(directory,entry.name);
+            if (entry.isSymbolicLink()) { if (owned) throw new Error('Cannot delete an animation workspace containing symbolic links.'); continue; }
+            if (entry.isDirectory()) walk(filename,visit,owned,depth+1);
+            else if (entry.isFile() && visit(filename)) add(filename);
+        }
+    };
+    for (const suffix of ['', '_n','_s','_icon','_hud','_hud_empty','_lod','_lod_n','_lod_s']) {
+        const texture=paths.path.join(folder,id+suffix+'.png');add(texture);add(texture+'.mcmeta');
+        walk(paths.path.join(folder,id+suffix+'_frames'),()=>true,true);
+    }
+    add(paths.path.join(folder,id+'.json'));add(paths.path.join(folder,id+'.geo.json'));
+    const canonical=paths.modelForSkin(draft.weapon,id,draft.kind);if(canonical)add(canonical);
+    const assets=paths.inside(paths.folder,'assets');
+    if (isDirectory(fs,assets)) for (const namespace of fs.readdirSync(assets,{withFileTypes:true}).filter(entry=>entry.isDirectory())) {
+        walk(paths.path.join(assets,namespace.name,'geo_models'),filename=>paths.path.basename(filename).endsWith('__skin_'+id+'.json'));
+    }
+    add(paths.inside(paths.folder,'assets','mcpskins','animations','skins',...draft.weapon.split(/[:/]/),id+'.animation.json'));
+    add(paths.inside(paths.folder,'.mcpskins_manager','model_backups',id+'.geo.json'));
+    directories.push(folder);
+    return {files:[...files],directories,related:[...related]};
+}
+function deleteSkin(repository,row,full=false,canDelete=()=>{}) {
+    const {fs,paths}=repository;
+    if (paths.path.dirname(row.filename)!==paths.registryDirectory) throw new Error('This skin is outside the selected registry directory.');
+    assertInside(fs,paths,row.filename);
+    const original=repository.read(row.filename);
+    if (baseWeapon(original)!==baseWeapon(row.data) || itemKind(original)!==itemKind(row.data) || !equalJSON(original.skins[row.index],row.skin)) throw new Error('This skin changed on disk. Refresh the list before deleting.');
+    const data=clone(original),id=row.skin.id;data.skins.splice(row.index,1);
+    if (!data.skins.some(skin=>isObject(skin) && skin.id===id)) for (const skin of data.skins) if (isObject(skin)) {
+        if (Array.isArray(skin.variants)) skin.variants=skin.variants.filter(value=>value!==id);
+        if (Array.isArray(skin.levels)) skin.levels=skin.levels.filter(level=>!isObject(level) || level.variant!==id);
+    }
+    const assets=full?skinFiles(fs,paths,row):{files:[],directories:[],related:[]};
+    if(full)canDelete(assets);
+    const writes=[{filename:row.filename,original,data}];
+    const metadata=metadataFile(paths);
+    if (fs.existsSync(metadata)) {
+        assertInside(fs,paths,metadata);
+        const saved=readJSON(fs,metadata),key=statusKey(paths,row);
+        if(isObject(saved) && isObject(saved.skin_statuses) && Object.hasOwn(saved.skin_statuses,key)) {
+            const changed=clone(saved);delete changed.skin_statuses[key];writes.push({filename:metadata,original:saved,data:changed});
+        }
+    }
+    let staging=null;const moved=[],written=[];
+    try {
+        if (assets.files.length) {
+            const parent=paths.inside(paths.folder,'.mcpskins_manager','deletions');assertInside(fs,paths,parent);fs.mkdirSync(parent,{recursive:true});
+            staging=paths.path.join(parent,Date.now().toString(36)+'_'+Math.random().toString(36).slice(2));fs.mkdirSync(staging);
+            for (const filename of assets.files) {
+                const destination=paths.path.join(staging,String(moved.length));fs.renameSync(filename,destination);moved.push({filename,destination});
+            }
+        }
+        for (const write of writes) {
+            if(!equalJSON(readJSON(fs,write.filename),write.original))throw new Error('A registry or metadata file changed before deletion. Refresh and try again.');
+            atomicJSON(fs,write.filename,write.data);written.push(write);
+        }
+    } catch(error) {
+        const failures=[];
+        for (const write of written.reverse()) try {
+            if(!equalJSON(readJSON(fs,write.filename),write.data))throw new Error('Changed externally');
+            atomicJSON(fs,write.filename,write.original);
+        } catch {failures.push(write.filename);}
+        for (const file of moved.reverse()) try {
+            if(fs.existsSync(file.filename))throw new Error('Destination changed externally');
+            fs.renameSync(file.destination,file.filename);
+        } catch {failures.push(file.filename);}
+        if(staging)try {fs.rmdirSync(staging);} catch { /* Retain recoverable staged files. */ }
+        throw new Error(error.message+(failures.length?' Some files could not be restored: '+failures.join(', ')+'. Remaining files are in '+staging+'.':''));
+    }
+    const leftovers=[];
+    for (const file of moved) try {fs.unlinkSync(file.destination);} catch {leftovers.push(file.destination);}
+    if(staging)try {fs.rmdirSync(staging);} catch { /* Report retained files below. */ }
+    for(const directory of assets.directories.sort((a,b)=>b.length-a.length)) try {fs.rmdirSync(directory);} catch { /* Preserve shared or nonempty folders. */ }
+    return {id,full,files:assets.files,related:assets.related,warning:leftovers.length?'Skin deleted. Some files could not be removed from '+staging+'.':''};
+}
+module.exports = {skinFiles,deleteSkin};
+
+},
+"src/storage/collections.js": function(module, exports, require) {
+'use strict';
+const {readJSON, atomicJSON, isDirectory} = require("src/storage/files.js");
+const {isObject, clone, equalJSON, BASE_KEYS, slugify} = require("src/domain/skin.js");
+const {collectionKey, validateCase, effectiveCase, caseOdds, buildCase} = require("src/domain/collections.js");
+
+function createJSON(fs, filename, data) {
+    const temporary = filename + '.tmp';
+    let owned = false;
+    try {
+        fs.writeFileSync(temporary, JSON.stringify(data,null,2) + '\n', {encoding:'utf8',flag:'wx'});
+        owned = true;
+        // COPYFILE_EXCL is 1; Blockbench's scoped filesystem does not expose constants.
+        fs.copyFileSync(temporary,filename,1);
+    } finally { if (owned) fs.unlinkSync(temporary); }
+}
+
+function scanCollections(fs, paths) {
+    const definitions = new Map(), members = new Map(), registries = [], issues = [];
+    const root = paths.path.join(paths.pack, 'data');
+    const warn = (filename, message, severity = 'error') => issues.push({filename, message, severity});
+    const walk = (directory, visit, depth = 0) => {
+        if (!isDirectory(fs, directory)) return;
+        if (depth > 16) throw new Error('Collection data folders are nested too deeply.');
+        for (const entry of fs.readdirSync(directory, {withFileTypes: true}).sort((a,b) => a.name.localeCompare(b.name))) {
+            const filename = paths.path.join(directory, entry.name);
+            if (entry.isDirectory()) walk(filename, visit, depth + 1);
+            else if (entry.isFile() && entry.name.endsWith('.json')) {
+                try { visit(filename, readJSON(fs, filename)); } catch (error) { warn(filename, error.message); }
+            }
+        }
+    };
+    if (isDirectory(fs, root)) for (const namespace of fs.readdirSync(root, {withFileTypes:true}).filter(entry => entry.isDirectory())) {
+        const base = paths.path.join(root, namespace.name);
+        for (const folder of ['collection_cases', 'skins']) try {
+            walk(paths.path.join(base, folder), (filename, data) => {
+                if (folder === 'collection_cases') {
+                    validateCase(data);
+                    const key = collectionKey(data.collection), definition = {filename, data};
+                    if (!definitions.has(key)) definitions.set(key, []);
+                    definitions.get(key).push(definition);
+                } else if (isObject(data) && Object.values(BASE_KEYS).some(key => Object.hasOwn(data,key))) {
+                    if (!Array.isArray(data.skins)) throw new Error('Registry skins must be a list.');
+                    registries.push({filename, data});
+                    for (const skin of data.skins) if (isObject(skin) && typeof skin.collection === 'string' && skin.collection.trim() && !String(skin.id).startsWith('default:')) {
+                        const key = collectionKey(skin.collection);
+                        if (!members.has(key)) members.set(key, []);
+                        members.get(key).push({skin, filename});
+                    }
+                }
+            });
+        } catch (error) { warn(paths.path.join(base, folder), error.message); }
+    }
+    for (const [key, entries] of definitions) if (entries.length > 1) for (const entry of entries) warn(entry.filename, 'Multiple case definitions target collection "' + key + '". Resolve the duplicate files before editing.');
+    const keys = new Set(['*', ...members.keys(), ...definitions.keys()]);
+    const rows = [...keys].map(key => {
+        const definition = definitions.get(key)?.[0], skins = members.get(key) || [];
+        return {key, name: definition ? definition.data.collection : skins[0]?.skin.collection.trim() || '*', filename: definition?.filename || '',
+            data: definition?.data || {}, duplicate: (definitions.get(key)?.length || 0) > 1, members: skins,
+            count: skins.length, title: definition?.data.title || ''};
+    }).sort((a,b) => a.key === '*' ? -1 : b.key === '*' ? 1 : a.name.localeCompare(b.name));
+    return {rows, definitions, registries, issues};
+}
+function collectionIssues(scan) {
+    const issues = [...scan.issues];
+    if (!scan.definitions.size) return issues;
+    const global = scan.definitions.get('*')?.[0]?.data || {};
+    const ids = new Set(scan.registries.flatMap(record => record.data.skins.filter(isObject).map(skin => skin.id)));
+    for (const row of scan.rows) {
+        if (row.key === '*') continue;
+        const settings = effectiveCase(global, row.data), odds = caseOdds(row.members.map(member => member.skin), settings);
+        const filename = row.filename || scan.definitions.get('*')?.[0]?.filename;
+        if (!filename) continue;
+        const add = message => issues.push({filename, severity:'warning', message: row.name + ': ' + message});
+        if (!odds.eligible) add('Case has no eligible rewards with positive rarity weights.');
+        for (const tier of odds.tiers) if (!tier.weight) add('Rarity "' + tier.rarity + '" has no positive case weight.');
+    }
+    for (const entries of scan.definitions.values()) for (const entry of entries) {
+        for (const id of entry.data.excluded_skins || []) if (!ids.has(id)) issues.push({filename:entry.filename, severity:'warning', message:'Excluded skin does not exist in this pack: ' + id + '. It may belong to another installed pack.'});
+    }
+    return issues;
+}
+class CollectionRepository {
+    constructor(fs, paths) { this.fs = fs; this.paths = paths; }
+    scan() { return scanCollections(this.fs, this.paths); }
+    save(draft, selected, baseline) {
+        const current = this.scan(), data = buildCase(draft, selected?.data || {}), key = collectionKey(data.collection);
+        const oldKey = selected?.key, renaming = selected && key !== oldKey;
+        if (selected?.duplicate || current.definitions.get(oldKey)?.length > 1) throw new Error('Resolve duplicate collection case definitions before saving.');
+        if (selected && (oldKey === '*') !== (key === '*')) throw new Error('Global Defaults cannot be renamed into a collection or vice versa.');
+        if ((!selected || renaming) && current.rows.some(row => row.key === key)) throw new Error('That collection already exists. Select it in the list to edit it.');
+        const old = oldKey && current.definitions.get(oldKey)?.[0];
+        if (selected?.filename ? !old || old.filename !== selected.filename || !equalJSON(old.data, selected.data) : old) throw new Error('This collection changed on disk. Close and reopen Collections before saving.');
+        const rename = selected && data.collection !== selected.name;
+        if (rename && current.issues.some(issue => issue.severity === 'error')) throw new Error('Resolve collection or registry scan errors before renaming a collection.');
+        if (rename && !equalJSON(current.rows.find(row => row.key === oldKey)?.members || [], selected.members)) throw new Error('Collection skins changed on disk. Close and reopen Collections before renaming.');
+        if (rename && baseline && !equalJSON(current.registries, baseline.registries)) throw new Error('Skin registries changed on disk. Close and reopen Collections before renaming.');
+        const directory = this.paths.inside(this.paths.folder, 'data', this.paths.namespace, 'collection_cases');
+        let filename = selected?.filename;
+        if (!filename) {
+            this.fs.mkdirSync(directory, {recursive:true});
+            const stem = key === '*' ? 'defaults' : slugify(data.collection) || 'collection';
+            filename = this.paths.path.join(directory, stem + '.json');
+            for (let suffix = 2; this.fs.existsSync(filename); suffix++) filename = this.paths.path.join(directory, stem + '_' + suffix + '.json');
+        }
+        const writes = [];
+        if (rename) for (const record of current.registries) {
+            const changed = clone(record.data); let count = 0;
+            for (const skin of changed.skins) if (isObject(skin) && collectionKey(skin.collection) === oldKey) { skin.collection = data.collection; count++; }
+            if (count) writes.push({filename:record.filename, data:changed, original:record.data});
+        }
+        writes.push({filename, data, original:selected?.filename ? selected.data : null});
+        const written = [];
+        try {
+            for (const write of writes) {
+                if (write.original === null) createJSON(this.fs,write.filename,write.data);
+                else {
+                    if (!equalJSON(readJSON(this.fs,write.filename),write.original)) throw new Error('A file changed on disk before saving. Reopen Collections.');
+                    atomicJSON(this.fs,write.filename,write.data);
+                }
+                written.push(write);
+            }
+        } catch (error) {
+            const failures = [];
+            for (const write of written.reverse()) try {
+                if (!equalJSON(readJSON(this.fs,write.filename),write.data)) throw new Error('Changed externally');
+                if (write.original === null) this.fs.unlinkSync(write.filename); else atomicJSON(this.fs,write.filename,write.original);
+            } catch { failures.push(write.filename); }
+            throw new Error(error.message + (failures.length ? ' Could not restore: ' + failures.join(', ') : ''));
+        }
+        return {key, filename, renamed:rename,created:!selected};
+    }
+}
+module.exports = {scanCollections, collectionIssues, CollectionRepository};
+
+},
+"src/domain/collections.js": function(module, exports, require) {
+'use strict';
+const {clone, isObject} = require("src/domain/skin.js");
+const collectionKey = value => String(value || '').trim().toLowerCase();
+const CASE_DEFAULTS = {price: 100, case_color: '#FFFFFF', requiresKey: true,
+    rarity_weights: {common: 55, uncommon: 27, rare: 12, epic: 5, legendary: 1}, excluded_skins: []};
+const TEXT_FIELDS = ['title', 'description', 'shop_icon'];
+function validateCase(data) {
+    if (!isObject(data) || typeof data.collection !== 'string' || !data.collection.trim()) throw new Error('A collection name is required.');
+    for (const key of TEXT_FIELDS) if (data[key] !== undefined && typeof data[key] !== 'string') throw new Error(key + ' must be text.');
+    if (data.price !== undefined && (!Number.isInteger(data.price) || data.price < 0 || data.price > 2147483647)) throw new Error('Price must be a whole number from 0 to 2147483647.');
+    if (data.case_color !== undefined && (typeof data.case_color !== 'string' || !/^#?[a-f0-9]{6}$/i.test(data.case_color))) throw new Error('Case color must use #RRGGBB.');
+    if (data.requiresKey !== undefined && typeof data.requiresKey !== 'boolean') throw new Error('requiresKey must be true or false.');
+    if (data.shop_icon && !/^(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+$/.test(data.shop_icon)) throw new Error('Shop icon must be a resource texture ID.');
+    if (data.rarity_weights !== undefined && (!isObject(data.rarity_weights) || Object.entries(data.rarity_weights).some(([key, value]) => !key.trim() || !Number.isInteger(value) || value < 0 || value > 2147483647))) throw new Error('Rarity weights must be nonnegative whole numbers.');
+    if (data.excluded_skins !== undefined && (!Array.isArray(data.excluded_skins) || data.excluded_skins.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('Excluded skins must be a list of skin IDs.');
+    return data;
+}
+function effectiveCase(global = {}, specific = {}) {
+    const result = clone(CASE_DEFAULTS);
+    for (const data of [global, specific]) {
+        for (const key of ['price', 'case_color', 'requiresKey', ...TEXT_FIELDS]) {
+            if (data[key] !== undefined && (typeof data[key] !== 'string' || data[key].trim())) result[key] = data[key];
+        }
+        for (const [key, value] of Object.entries(data.rarity_weights || {})) result.rarity_weights[key.toLowerCase()] = value;
+        result.excluded_skins = [...new Set([...result.excluded_skins, ...(data.excluded_skins || [])])];
+    }
+    return result;
+}
+function caseOdds(skins, settings) {
+    const excluded = new Set(settings.excluded_skins), groups = new Map();
+    for (const skin of skins) {
+        if (excluded.has(skin.id) || String(skin.id).startsWith('default:')) continue;
+        const rarity = String(skin.rarity || 'common').toLowerCase();
+        if (!groups.has(rarity)) groups.set(rarity, []);
+        groups.get(rarity).push(skin);
+    }
+    const tiers = [...groups].map(([rarity, members]) => ({rarity, members, weight: Object.hasOwn(settings.rarity_weights,rarity) ? settings.rarity_weights[rarity] : 0}));
+    const total = tiers.reduce((sum, tier) => sum + tier.weight, 0);
+    return {total, eligible: tiers.filter(tier => tier.weight > 0).reduce((sum, tier) => sum + tier.members.length, 0),
+        tiers: tiers.map(tier => {
+            const chance = total ? tier.weight / total : 0;
+            const weights = tier.members.map(skin => Math.max(1, Number.isSafeInteger(skin.weight) ? skin.weight : 1));
+            const skinTotal = weights.reduce((a, b) => a + b, 0);
+            return {rarity: tier.rarity, weight: tier.weight, chance, count: tier.members.length,
+                skins: tier.members.map((skin, index) => ({id: skin.id, name: skin.name || skin.id, chance: chance * weights[index] / skinTotal}))};
+        })};
+}
+function caseDraft(row, rarities) {
+    const data = row ? row.data : {};
+    return {collection: row ? row.name : '', title: data.title || '', description: data.description || '',
+        price: data.price === undefined ? '' : String(data.price), case_color: data.case_color || '', shop_icon: data.shop_icon || '',
+        requiresKey: data.requiresKey === undefined ? '' : String(data.requiresKey),
+        weights: [...new Set([...Object.keys(rarities), ...Object.keys(data.rarity_weights || {})])].map(id => ({id, value: data.rarity_weights?.[id] === undefined ? '' : String(data.rarity_weights[id])})),
+        exclusions: (data.excluded_skins || []).join('\n')};
+}
+function buildCase(draft, previous = {}) {
+    const data = {...clone(previous), collection: draft.collection.trim()};
+    for (const key of [...TEXT_FIELDS, 'case_color']) { if (draft[key].trim()) data[key] = draft[key].trim(); else delete data[key]; }
+    const integer = (value, label) => { if (!/^[0-9]+$/.test(value.trim())) throw new Error(label + ' must be a nonnegative whole number.'); return Number(value); };
+    if (draft.price.trim()) data.price = integer(draft.price, 'Price'); else delete data.price;
+    if (draft.requiresKey === '') delete data.requiresKey; else if (['true', 'false'].includes(draft.requiresKey)) data.requiresKey = draft.requiresKey === 'true'; else throw new Error('Choose a key requirement.');
+    const weights = Object.create(null);
+    for (const row of draft.weights) if (row.value.trim()) weights[row.id] = integer(row.value, 'Rarity weight');
+    if (Object.keys(weights).length) data.rarity_weights = weights; else delete data.rarity_weights;
+    const exclusions = [...new Set(draft.exclusions.split(/[\r\n,]+/).map(id => id.trim()).filter(Boolean))];
+    if (exclusions.length) data.excluded_skins = exclusions; else delete data.excluded_skins;
+    return validateCase(data);
+}
+module.exports = {collectionKey, CASE_DEFAULTS, validateCase, effectiveCase, caseOdds, caseDraft, buildCase};
 
 },
 "src/storage/rarity-editor.js": function(module, exports, require) {
@@ -3306,221 +4171,13 @@ function rarityComponent(editor) {
 module.exports = {rarityComponent};
 
 },
-"src/storage/collections.js": function(module, exports, require) {
-'use strict';
-const {readJSON, atomicJSON, isDirectory} = require("src/storage/files.js");
-const {isObject, clone, equalJSON, BASE_KEYS, slugify} = require("src/domain/skin.js");
-const {collectionKey, validateCase, effectiveCase, caseOdds, buildCase} = require("src/domain/collections.js");
-
-function createJSON(fs, filename, data) {
-    const temporary = filename + '.tmp';
-    let owned = false;
-    try {
-        fs.writeFileSync(temporary, JSON.stringify(data,null,2) + '\n', {encoding:'utf8',flag:'wx'});
-        owned = true;
-        // COPYFILE_EXCL is 1; Blockbench's scoped filesystem does not expose constants.
-        fs.copyFileSync(temporary,filename,1);
-    } finally { if (owned) fs.unlinkSync(temporary); }
-}
-
-function scanCollections(fs, paths) {
-    const definitions = new Map(), members = new Map(), registries = [], issues = [];
-    const root = paths.path.join(paths.pack, 'data');
-    const warn = (filename, message, severity = 'error') => issues.push({filename, message, severity});
-    const walk = (directory, visit, depth = 0) => {
-        if (!isDirectory(fs, directory)) return;
-        if (depth > 16) throw new Error('Collection data folders are nested too deeply.');
-        for (const entry of fs.readdirSync(directory, {withFileTypes: true}).sort((a,b) => a.name.localeCompare(b.name))) {
-            const filename = paths.path.join(directory, entry.name);
-            if (entry.isDirectory()) walk(filename, visit, depth + 1);
-            else if (entry.isFile() && entry.name.endsWith('.json')) {
-                try { visit(filename, readJSON(fs, filename)); } catch (error) { warn(filename, error.message); }
-            }
-        }
-    };
-    if (isDirectory(fs, root)) for (const namespace of fs.readdirSync(root, {withFileTypes:true}).filter(entry => entry.isDirectory())) {
-        const base = paths.path.join(root, namespace.name);
-        for (const folder of ['collection_cases', 'skins']) try {
-            walk(paths.path.join(base, folder), (filename, data) => {
-                if (folder === 'collection_cases') {
-                    validateCase(data);
-                    const key = collectionKey(data.collection), definition = {filename, data};
-                    if (!definitions.has(key)) definitions.set(key, []);
-                    definitions.get(key).push(definition);
-                } else if (isObject(data) && Object.values(BASE_KEYS).some(key => Object.hasOwn(data,key))) {
-                    if (!Array.isArray(data.skins)) throw new Error('Registry skins must be a list.');
-                    registries.push({filename, data});
-                    for (const skin of data.skins) if (isObject(skin) && typeof skin.collection === 'string' && skin.collection.trim() && !String(skin.id).startsWith('default:')) {
-                        const key = collectionKey(skin.collection);
-                        if (!members.has(key)) members.set(key, []);
-                        members.get(key).push({skin, filename});
-                    }
-                }
-            });
-        } catch (error) { warn(paths.path.join(base, folder), error.message); }
-    }
-    for (const [key, entries] of definitions) if (entries.length > 1) for (const entry of entries) warn(entry.filename, 'Multiple case definitions target collection "' + key + '". Resolve the duplicate files before editing.');
-    const keys = new Set(['*', ...members.keys(), ...definitions.keys()]);
-    const rows = [...keys].map(key => {
-        const definition = definitions.get(key)?.[0], skins = members.get(key) || [];
-        return {key, name: definition ? definition.data.collection : skins[0]?.skin.collection.trim() || '*', filename: definition?.filename || '',
-            data: definition?.data || {}, duplicate: (definitions.get(key)?.length || 0) > 1, members: skins,
-            count: skins.length, title: definition?.data.title || ''};
-    }).sort((a,b) => a.key === '*' ? -1 : b.key === '*' ? 1 : a.name.localeCompare(b.name));
-    return {rows, definitions, registries, issues};
-}
-function collectionIssues(scan) {
-    const issues = [...scan.issues];
-    if (!scan.definitions.size) return issues;
-    const global = scan.definitions.get('*')?.[0]?.data || {};
-    const ids = new Set(scan.registries.flatMap(record => record.data.skins.filter(isObject).map(skin => skin.id)));
-    for (const row of scan.rows) {
-        if (row.key === '*') continue;
-        const settings = effectiveCase(global, row.data), odds = caseOdds(row.members.map(member => member.skin), settings);
-        const filename = row.filename || scan.definitions.get('*')?.[0]?.filename;
-        if (!filename) continue;
-        const add = message => issues.push({filename, severity:'warning', message: row.name + ': ' + message});
-        if (!odds.eligible) add('Case has no eligible rewards with positive rarity weights.');
-        for (const tier of odds.tiers) if (!tier.weight) add('Rarity "' + tier.rarity + '" has no positive case weight.');
-    }
-    for (const entries of scan.definitions.values()) for (const entry of entries) {
-        for (const id of entry.data.excluded_skins || []) if (!ids.has(id)) issues.push({filename:entry.filename, severity:'warning', message:'Excluded skin does not exist in this pack: ' + id + '. It may belong to another installed pack.'});
-    }
-    return issues;
-}
-class CollectionRepository {
-    constructor(fs, paths) { this.fs = fs; this.paths = paths; }
-    scan() { return scanCollections(this.fs, this.paths); }
-    save(draft, selected, baseline) {
-        const current = this.scan(), data = buildCase(draft, selected?.data || {}), key = collectionKey(data.collection);
-        const oldKey = selected?.key, renaming = selected && key !== oldKey;
-        if (selected?.duplicate || current.definitions.get(oldKey)?.length > 1) throw new Error('Resolve duplicate collection case definitions before saving.');
-        if (selected && (oldKey === '*') !== (key === '*')) throw new Error('Global Defaults cannot be renamed into a collection or vice versa.');
-        if ((!selected || renaming) && current.rows.some(row => row.key === key)) throw new Error('That collection already exists. Select it in the list to edit it.');
-        const old = oldKey && current.definitions.get(oldKey)?.[0];
-        if (selected?.filename ? !old || old.filename !== selected.filename || !equalJSON(old.data, selected.data) : old) throw new Error('This collection changed on disk. Close and reopen Collections before saving.');
-        const rename = selected && data.collection !== selected.name;
-        if (rename && current.issues.some(issue => issue.severity === 'error')) throw new Error('Resolve collection or registry scan errors before renaming a collection.');
-        if (rename && !equalJSON(current.rows.find(row => row.key === oldKey)?.members || [], selected.members)) throw new Error('Collection skins changed on disk. Close and reopen Collections before renaming.');
-        if (rename && baseline && !equalJSON(current.registries, baseline.registries)) throw new Error('Skin registries changed on disk. Close and reopen Collections before renaming.');
-        const directory = this.paths.inside(this.paths.folder, 'data', this.paths.namespace, 'collection_cases');
-        let filename = selected?.filename;
-        if (!filename) {
-            this.fs.mkdirSync(directory, {recursive:true});
-            const stem = key === '*' ? 'defaults' : slugify(data.collection) || 'collection';
-            filename = this.paths.path.join(directory, stem + '.json');
-            for (let suffix = 2; this.fs.existsSync(filename); suffix++) filename = this.paths.path.join(directory, stem + '_' + suffix + '.json');
-        }
-        const writes = [];
-        if (rename) for (const record of current.registries) {
-            const changed = clone(record.data); let count = 0;
-            for (const skin of changed.skins) if (isObject(skin) && collectionKey(skin.collection) === oldKey) { skin.collection = data.collection; count++; }
-            if (count) writes.push({filename:record.filename, data:changed, original:record.data});
-        }
-        writes.push({filename, data, original:selected?.filename ? selected.data : null});
-        const written = [];
-        try {
-            for (const write of writes) {
-                if (write.original === null) createJSON(this.fs,write.filename,write.data);
-                else {
-                    if (!equalJSON(readJSON(this.fs,write.filename),write.original)) throw new Error('A file changed on disk before saving. Reopen Collections.');
-                    atomicJSON(this.fs,write.filename,write.data);
-                }
-                written.push(write);
-            }
-        } catch (error) {
-            const failures = [];
-            for (const write of written.reverse()) try {
-                if (!equalJSON(readJSON(this.fs,write.filename),write.data)) throw new Error('Changed externally');
-                if (write.original === null) this.fs.unlinkSync(write.filename); else atomicJSON(this.fs,write.filename,write.original);
-            } catch { failures.push(write.filename); }
-            throw new Error(error.message + (failures.length ? ' Could not restore: ' + failures.join(', ') : ''));
-        }
-        return {key, filename, renamed:rename};
-    }
-}
-module.exports = {scanCollections, collectionIssues, CollectionRepository};
-
-},
-"src/domain/collections.js": function(module, exports, require) {
-'use strict';
-const {clone, isObject} = require("src/domain/skin.js");
-const collectionKey = value => String(value || '').trim().toLowerCase();
-const CASE_DEFAULTS = {price: 100, case_color: '#FFFFFF', requiresKey: true,
-    rarity_weights: {common: 55, uncommon: 27, rare: 12, epic: 5, legendary: 1}, excluded_skins: []};
-const TEXT_FIELDS = ['title', 'description', 'shop_icon'];
-function validateCase(data) {
-    if (!isObject(data) || typeof data.collection !== 'string' || !data.collection.trim()) throw new Error('A collection name is required.');
-    for (const key of TEXT_FIELDS) if (data[key] !== undefined && typeof data[key] !== 'string') throw new Error(key + ' must be text.');
-    if (data.price !== undefined && (!Number.isInteger(data.price) || data.price < 0 || data.price > 2147483647)) throw new Error('Price must be a whole number from 0 to 2147483647.');
-    if (data.case_color !== undefined && (typeof data.case_color !== 'string' || !/^#?[a-f0-9]{6}$/i.test(data.case_color))) throw new Error('Case color must use #RRGGBB.');
-    if (data.requiresKey !== undefined && typeof data.requiresKey !== 'boolean') throw new Error('requiresKey must be true or false.');
-    if (data.shop_icon && !/^(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+$/.test(data.shop_icon)) throw new Error('Shop icon must be a resource texture ID.');
-    if (data.rarity_weights !== undefined && (!isObject(data.rarity_weights) || Object.entries(data.rarity_weights).some(([key, value]) => !key.trim() || !Number.isInteger(value) || value < 0 || value > 2147483647))) throw new Error('Rarity weights must be nonnegative whole numbers.');
-    if (data.excluded_skins !== undefined && (!Array.isArray(data.excluded_skins) || data.excluded_skins.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('Excluded skins must be a list of skin IDs.');
-    return data;
-}
-function effectiveCase(global = {}, specific = {}) {
-    const result = clone(CASE_DEFAULTS);
-    for (const data of [global, specific]) {
-        for (const key of ['price', 'case_color', 'requiresKey', ...TEXT_FIELDS]) {
-            if (data[key] !== undefined && (typeof data[key] !== 'string' || data[key].trim())) result[key] = data[key];
-        }
-        for (const [key, value] of Object.entries(data.rarity_weights || {})) result.rarity_weights[key.toLowerCase()] = value;
-        result.excluded_skins = [...new Set([...result.excluded_skins, ...(data.excluded_skins || [])])];
-    }
-    return result;
-}
-function caseOdds(skins, settings) {
-    const excluded = new Set(settings.excluded_skins), groups = new Map();
-    for (const skin of skins) {
-        if (excluded.has(skin.id) || String(skin.id).startsWith('default:')) continue;
-        const rarity = String(skin.rarity || 'common').toLowerCase();
-        if (!groups.has(rarity)) groups.set(rarity, []);
-        groups.get(rarity).push(skin);
-    }
-    const tiers = [...groups].map(([rarity, members]) => ({rarity, members, weight: Object.hasOwn(settings.rarity_weights,rarity) ? settings.rarity_weights[rarity] : 0}));
-    const total = tiers.reduce((sum, tier) => sum + tier.weight, 0);
-    return {total, eligible: tiers.filter(tier => tier.weight > 0).reduce((sum, tier) => sum + tier.members.length, 0),
-        tiers: tiers.map(tier => {
-            const chance = total ? tier.weight / total : 0;
-            const weights = tier.members.map(skin => Math.max(1, Number.isSafeInteger(skin.weight) ? skin.weight : 1));
-            const skinTotal = weights.reduce((a, b) => a + b, 0);
-            return {rarity: tier.rarity, weight: tier.weight, chance, count: tier.members.length,
-                skins: tier.members.map((skin, index) => ({id: skin.id, name: skin.name || skin.id, chance: chance * weights[index] / skinTotal}))};
-        })};
-}
-function caseDraft(row, rarities) {
-    const data = row ? row.data : {};
-    return {collection: row ? row.name : '', title: data.title || '', description: data.description || '',
-        price: data.price === undefined ? '' : String(data.price), case_color: data.case_color || '', shop_icon: data.shop_icon || '',
-        requiresKey: data.requiresKey === undefined ? '' : String(data.requiresKey),
-        weights: [...new Set([...Object.keys(rarities), ...Object.keys(data.rarity_weights || {})])].map(id => ({id, value: data.rarity_weights?.[id] === undefined ? '' : String(data.rarity_weights[id])})),
-        exclusions: (data.excluded_skins || []).join('\n')};
-}
-function buildCase(draft, previous = {}) {
-    const data = {...clone(previous), collection: draft.collection.trim()};
-    for (const key of [...TEXT_FIELDS, 'case_color']) { if (draft[key].trim()) data[key] = draft[key].trim(); else delete data[key]; }
-    const integer = (value, label) => { if (!/^[0-9]+$/.test(value.trim())) throw new Error(label + ' must be a nonnegative whole number.'); return Number(value); };
-    if (draft.price.trim()) data.price = integer(draft.price, 'Price'); else delete data.price;
-    if (draft.requiresKey === '') delete data.requiresKey; else if (['true', 'false'].includes(draft.requiresKey)) data.requiresKey = draft.requiresKey === 'true'; else throw new Error('Choose a key requirement.');
-    const weights = Object.create(null);
-    for (const row of draft.weights) if (row.value.trim()) weights[row.id] = integer(row.value, 'Rarity weight');
-    if (Object.keys(weights).length) data.rarity_weights = weights; else delete data.rarity_weights;
-    const exclusions = [...new Set(draft.exclusions.split(/[\r\n,]+/).map(id => id.trim()).filter(Boolean))];
-    if (exclusions.length) data.excluded_skins = exclusions; else delete data.excluded_skins;
-    return validateCase(data);
-}
-module.exports = {collectionKey, CASE_DEFAULTS, validateCase, effectiveCase, caseOdds, caseDraft, buildCase};
-
-},
 "src/state/collections.js": function(module, exports, require) {
 'use strict';
 const {caseDraft, buildCase, effectiveCase, caseOdds, collectionKey} = require("src/domain/collections.js");
 const {collectionIssues} = require("src/storage/collections.js");
 class CollectionEditor {
-    constructor(repository, rarities, confirm, saved, active = () => true) {
-        Object.assign(this, {repository, rarities, confirm, saved, active, selected:null});
+    constructor(repository, rarities, confirm, saved, active = () => true, canRename = () => true) {
+        Object.assign(this, {repository, rarities, confirm, saved, active, canRename, selected:null});
         this.state = {rows:[], warnings:[], search:'', selectedKey:'', active:false, draft:caseDraft(null,rarities), dirty:false, busy:false, error:'', notice:''};
         this.load();
     }
@@ -3571,6 +4228,7 @@ class CollectionEditor {
     save() {
         try {
             if (!this.active()) throw new Error('The selected pack changed or has unsaved skin edits. Save those edits and reopen Collections.');
+            if(this.selected && this.state.draft.collection.trim()!==this.selected.name && !this.canRename()) throw new Error('Save or discard your skin edits before renaming a collection.');
             const result = this.repository.save(this.state.draft,this.selected,this.scan);
             this.load(result.key); this.saved(result); this.state.notice = result.renamed ? 'Collection and matching skin entries renamed.' : 'Collection saved.';
             return true;
@@ -3601,7 +4259,7 @@ function collectionComponent(editor) {
             exclude(id,event) { editor.exclude(id,event.target.checked); }, percent(value) { return (value*100).toFixed(2)+'%'; }
         },
         template: `<section class="mcpskins-rarity-manager mcpskins-collections">
-            <p class="mcpskins-rarity-muted">Collection Cases settings for this pack. Blank fields inherit Global Defaults, then the addon's defaults. Save and use /reload in game.</p>
+            <p class="mcpskins-rarity-muted">Collections and metadata for this pack. Most of this is optional and only needed when using Collection Cases.</p>
             <details v-if="c.warnings.length"><summary>{{c.warnings.length}} collection issue(s)</summary><p v-for="(warning,index) in c.warnings" :key="index">{{warning}}</p></details>
             <div class="mcpskins-rarity-layout"><section class="mcpskins-rarity-browser" aria-label="Collection list">
                 <div class="mcpskins-rarity-toolbar"><input type="search" v-model="c.search" placeholder="Search collections..." aria-label="Search collections"><button type="button" :disabled="c.busy" @click="create">New Collection</button></div>
@@ -3686,6 +4344,7 @@ function settingsComponent(state, change, open, reset, close) {
                     <section v-show="tab==='debug'" id="mcpskins-settings-panel-debug" role="tabpanel" aria-labelledby="mcpskins-settings-tab-debug">
                         <h3>Health Check</h3>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.live" @change="edit('health','live',$event)">Check saved files automatically</label><p>When disabled, click the health icon to run a check manually.</p>
+                        <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.skipLowOrder" @change="edit('health','skipLowOrder',$event)">Skip skins with status order 5 or lower</label><p>Skips Planned, Unassigned, and custom statuses at 5 or below. Pack-wide registry and definition checks still run.</p>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingHud" @change="edit('health','missingHud',$event)">Warn about missing HUD textures</label>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingIcon" @change="edit('health','missingIcon',$event)">Warn about missing icon textures</label>
                         <label class="mcpskins-settings-check"><input type="checkbox" :checked="s.settings.health.missingMaps" @change="edit('health','missingMaps',$event)">Warn about missing normal/specular maps when defaults exist</label>
@@ -3839,6 +4498,24 @@ function rememberPack(path, history, entry) {
 module.exports = {RECENT_PACKS, recentPacks, rememberPack};
 
 },
+"src/ui/custom-status.js": function(module, exports, require) {
+'use strict';
+
+const SORT_HELP = 'Default sort orders: Unassigned 0, Planned 5, WIP 10, Complete 20.';
+function customStatusComponent(state) {
+    return {
+        data() {return {status:state,sortHelp:SORT_HELP};},
+        template:`<section class="mcpskins-custom-status">
+            <label>Status name<input v-model="status.name" maxlength="64" placeholder="For Review" aria-label="Status name"></label>
+            <label><span>Sort order <span class="mcpskins-field-help" :title="sortHelp" :aria-label="sortHelp" tabindex="0">?</span></span><input type="number" step="1" v-model="status.order" aria-label="Sort order"></label>
+            <label>Flag color<input type="color" v-model="status.color" aria-label="Flag color"></label>
+            <p v-if="status.error" class="mcpskins-health-error" role="alert">{{status.error}}</p>
+        </section>`
+    };
+}
+module.exports = {SORT_HELP,customStatusComponent};
+
+},
 "src/assets/health.js": function(module, exports, require) {
 'use strict';
 const {isObject, baseWeapon, validWeapon, basename, BASE_KEYS, itemKind} = require("src/domain/skin.js");
@@ -3847,10 +4524,11 @@ const {variantIssues} = require("src/domain/variants.js");
 const {scanRarities} = require("src/storage/rarities.js");
 const {scanCollections, collectionIssues} = require("src/storage/collections.js");
 const {readJSON, isFile, isDirectory} = require("src/storage/files.js");
+const {rowStatus} = require("src/domain/status.js");
 
 function checkPack(fs, paths, options = {}) {
     const issues = [];
-    let files = 0, skins = 0;
+    let files = 0, skins = 0, skipped = 0;
     const add = (severity, message, filename, row = null) => issues.push({severity, message, filename,
         rowKey: row ? row.key : '', skinId: row ? String(row.skin.id ?? '') : '', registry: row ? row.filename : filename});
     const {rarities, warnings: rarityWarnings} = scanRarities(fs, paths);
@@ -3862,7 +4540,7 @@ function checkPack(fs, paths, options = {}) {
     try { metadata = loadPackMetadata(fs, paths); } catch (error) { add('error', `Invalid pack metadata: ${error.message}`, metadataFile(paths)); }
     if (!isDirectory(fs, paths.registryDirectory)) {
         add('error', 'The skins registry directory is missing.', paths.registryDirectory);
-        return {issues, files, skins};
+        return {issues, files, skins, skipped};
     }
     for (const name of fs.readdirSync(paths.registryDirectory).filter(name => name.endsWith('.json')).sort()) {
         const filename = paths.path.join(paths.registryDirectory, name);
@@ -3879,13 +4557,15 @@ function checkPack(fs, paths, options = {}) {
         if (data.author !== undefined && typeof data.author !== 'string') add('error', 'File author must be text.', filename);
         for (const problem of variantIssues(data.skins)) {
             const row = {key: `${filename}\0${problem.index}`, filename, skin: data.skins[problem.index]};
+            if(options.skipLowOrder===true && (rowStatus(metadata,paths,row,options.customStatuses)?.order ?? 0)<=5)continue;
             add('error', problem.message, filename, row);
         }
         const ids = new Set();
         data.skins.forEach((skin, index) => {
             if (!isObject(skin)) { add('error', `Entry ${index + 1} is not a skin object.`, filename); return; }
-            skins++;
             const row = {key: `${filename}\0${index}`, filename, data, index, skin};
+            if(options.skipLowOrder===true && (rowStatus(metadata,paths,row,options.customStatuses)?.order ?? 0)<=5){skipped++;return;}
+            skins++;
             const issue = (severity, message, file = filename) => add(severity, message, file, row);
             for (const field of ['author', 'subtitle']) if (skin[field] !== undefined && typeof skin[field] !== 'string') issue('error', field + ' must be text.');
             if (skin.limited !== undefined && typeof skin.limited !== 'boolean') issue('error', 'limited must be true or false.');
@@ -3950,7 +4630,7 @@ function checkPack(fs, paths, options = {}) {
     }
     if (!files) add('warning', 'No skin registry files found.', paths.registryDirectory);
     issues.sort((a, b) => (a.severity === 'error' ? 0 : 1) - (b.severity === 'error' ? 0 : 1));
-    return {issues, files, skins};
+    return {issues, files, skins, skipped};
 }
 module.exports = {checkPack};
 
@@ -4151,6 +4831,7 @@ function healthComponent(report, select, reveal, setIgnored = null) {
         },
         template: `<section class="mcpskins-health">
             <p>{{report.skins}} skins in {{report.files}} registry files checked. <strong>{{errors}} errors, {{warnings}} warnings.</strong> <span v-if="ignoredIssues.length">{{ignoredIssues.length}} ignored.</span></p>
+            <p v-if="report.skipped" class="mcpskins-muted">{{report.skipped}} skin(s) skipped because their status order is 5 or lower.</p>
             <p class="mcpskins-muted">Checks saved files. Warnings can be optionally ignored</p>
             <p v-if="!activeIssues.length">No active issues found.</p>
             <div v-else class="mcpskins-health-list"><article v-for="(issue,index) in activeIssues" :key="index">
@@ -4557,6 +5238,7 @@ const {baseWeapon, defaultColor} = require("src/domain/skin.js");
 const {variantEditor} = require("src/ui/variant-editor.js");
 const {fieldHelp} = require("src/ui/field-help.js");
 const {weaponPicker} = require("src/ui/weapon-picker.js");
+const {collectionPicker} = require("src/ui/collection-picker.js");
 const LIGHT_PALETTES = {
     'Frutiger Aero': {panel: '#E8F5FC', field: '#F7FCFF', text: '#163C57', muted: '#456A80', border: '#A5C7DA', accent: '#087DB9', selected: '#B8DEF5'},
     Neo: {...THEMES.Neo, muted: '#526B7C', accent: '#B94229'},
@@ -4566,7 +5248,7 @@ const LIGHT_PALETTES = {
 function panelComponent(controller) {
     const manager = controller.manager;
     return {
-        components: {'field-help': fieldHelp, 'weapon-picker': weaponPicker, 'variant-editor': variantEditor},
+        components: {'field-help': fieldHelp, 'weapon-picker': weaponPicker, 'collection-picker':collectionPicker, 'variant-editor': variantEditor},
         data() { return {pluginTitle: PLUGIN_TITLE, settingsIcon: icons.settings, s: manager.state, listHeightDraft:null, listMaximum:MAX_LIST_HEIGHT, titleEditing: false, titleDraft: '', titlePack: '', titleSaving: false, themes: ['Blockbench', ...Object.keys(THEMES)]}; },
         computed: {
             listHeight() { return Math.min(this.listMaximum,this.listHeightDraft ?? this.s.settings.appearance.listHeight); },
@@ -4602,6 +5284,7 @@ function panelComponent(controller) {
             },
             weaponOptions() { return weaponSuggestions(this.s.gunPackItems, this.s.draft.kind); },
             collections() { return manager.collections(); },
+            collectionOptions() { return [...this.s.collectionOptions,...manager.collections()]; },
             rows() { return manager.filteredRows(); },
             hiddenSelectedCount() {
                 const visible = new Set(this.rows.map(row => row.key));
@@ -4685,13 +5368,16 @@ function panelComponent(controller) {
             editVariants(value) { controller.edit('variants', value); },
             editLevels(value) { controller.edit('levels', value); },
             editWeapon(value) { controller.edit('weapon', value); },
+            editCollection(value) { controller.edit('collection',value); },
+            refreshCollections() { controller.run(()=>controller.refreshCollectionOptions()); },
+            newCollection() { return controller.openCollections(true); },
             commitWeapon() { controller.commitWeapon(); },
             command(name) { controller[name](); },
             select(row, event) { controller.select(row, event); },
             sort(column) { manager.sort(column); },
             heading(column, label) { return label + (this.s.sortColumn === column ? (this.s.descending ? ' ▼' : ' ▲') : ''); },
             gun(row) { return manager.prefixFor(baseWeapon(row.data)); },
-            status(row) { return rowStatus(this.s.packMetadata, manager.repository.paths, row); },
+            status(row) { return rowStatus(this.s.packMetadata, manager.repository.paths, row,this.s.settings.customStatuses); },
             rowToken(row) { return encodeURIComponent(row.key); },
             filename(row) { return controller.desktop.path.basename(row.filename); },
             rarityName(rarity) {
@@ -4715,6 +5401,7 @@ function panelComponent(controller) {
                         <button type="button" class="mcpskins-secondary mcpskins-health-button" @click="command('healthCheck')" :data-health="s.health.status" :title="healthTitle" :aria-label="healthTitle"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" focusable="false"><path v-if="s.health.status === 'error'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/><template v-else-if="s.health.status === 'warning'"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 3L2 21h20z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 9v5m0 3v.2"/></template><path v-else-if="s.health.status === 'good'" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M4 12l5 5L20 6"/><path v-else fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" d="M12 3a9 9 0 100 18 9 9 0 000-18"/></svg></button>
                     </template>
                     <button type="button" class="mcpskins-secondary" @click="command('configure')" title="Choose pack directory and namespace">Select Pack</button>
+                    <button v-if="s.ready" type="button" class="mcpskins-secondary" title="Export the pack as a ZIP" @click="command('openExport')">Export...</button>
                     <button type="button" class="mcpskins-secondary mcpskins-help-button" @click="command('showSettings')" title="Settings" aria-label="Settings"><img :src="settingsIcon" alt="" aria-hidden="true"></button>
                 </div>
             </header>
@@ -4726,7 +5413,7 @@ function panelComponent(controller) {
                 <p class="mcpskins-path" :title="s.directory">{{s.folder}} / {{s.namespace}}<br>{{s.directory}}</p>
                 <p v-if="s.notice" class="mcpskins-notice" role="status">{{s.notice}}</p>
                 <details v-if="s.warnings.length" class="mcpskins-warnings"><summary>{{s.warnings.length}} file(s) skipped</summary><p v-for="warning in s.warnings.slice(0, 10)">{{warning}}</p></details>
-                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" title="Edit TACZ gun pack directory" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" title="Edit and create rarities" @click="command('openRarities')">Rarities</button><button type="button" title="Edit collection metadata for CollectionCases mod" @click="command('openCollections')">Collection Cases</button></div>
+                <div class="mcpskins-gunpacks"><span class="mcpskins-muted" :title="s.gunPackDirectory">{{s.gunPackMessage || 'Discover default models and textures from installed TaCZ packs.'}}</span><button type="button" title="Edit TACZ gun pack directory" @click="command('configureGunPacks')">Gun Packs...</button><button type="button" title="Edit and create rarities" @click="command('openRarities')">Rarities</button><button type="button" title="Edit collection metadata for CollectionCases mod" @click="command('openCollections')">Collections Manager</button></div>
                 <details v-if="s.gunPackWarnings.length" class="mcpskins-warnings"><summary>{{s.gunPackWarnings.length}} gun-pack warning(s)</summary><p v-for="warning in s.gunPackWarnings.slice(0, 20)">{{warning}}</p></details>
                 <div class="mcpskins-workspace">
                     <section class="mcpskins-browser" aria-label="Skin browser">
@@ -4767,7 +5454,7 @@ function panelComponent(controller) {
                                         <label><span>Skin name <field-help name="Skin name"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span> <span class="mcpskins-muted mcpskins-title">{{title}}</span><input aria-label="Skin name" :disabled="bulk" :value="bulk ? '' : s.draft.label" @input="edit('label',$event)"></label>
                                         <label class="mcpskins-check"><input type="checkbox" :disabled="bulk" :checked="s.draft.override_prefix" @change="edit('override_prefix',$event)"><span>Override name prefix <field-help name="Override name prefix"></field-help></span></label>
                                         <label v-if="s.draft.override_prefix"><span>Name prefix <field-help name="Name prefix"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><input :disabled="bulk" :value="s.draft.name_prefix" @input="edit('name_prefix',$event)" placeholder="Custom weapon name"></label>
-                                        <label><span>Collection <field-help name="Collection"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><input :placeholder="bulk && s.mixed.collection ? 'Mixed values' : ''" :value="s.draft.collection" @input="edit('collection',$event)"></label>
+                                        <label><span>Collection <field-help name="Collection"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><collection-picker :value="s.draft.collection" :collections="collectionOptions" :mixed="bulk && !!s.mixed.collection" @input="editCollection" @open="refreshCollections" @create="newCollection"></collection-picker></label>
                                         <label><span>Subtitle <field-help name="Subtitle"></field-help></span><span v-if="s.draft.invalid_subtitle" class="mcpskins-muted">Invalid saved value; edit to replace it.</span><input :placeholder="bulk && s.mixed.subtitle ? 'Mixed values' : '(Optional)'" :value="s.draft.subtitle" @input="edit('subtitle',$event)"></label>
                                         <label><span>Skin author <field-help name="Skin author"></field-help></span> <span v-if="s.draft.invalid_author || (!bulk && fileAuthor)" class="mcpskins-muted"><span v-if="s.draft.invalid_author"> Invalid saved value; edit to replace it.</span><span v-if="!bulk && fileAuthor"> File default: {{fileAuthor}}.</span></span><input :placeholder="bulk && s.mixed.author ? 'Mixed values' : '(Optional)'" :value="s.draft.author" @input="edit('author',$event)"></label>
                                         <label><span>Rarity <field-help name="Rarity"></field-help> <span class="mcpskins-required" title="Required" aria-label="Required">*</span></span><select :value="s.draft.rarity" @change="edit('rarity',$event)"><option v-if="bulk && s.mixed.rarity" value="" disabled>Mixed values</option><option v-for="rarity in rarities" :key="rarity.id" :value="rarity.id">{{rarity.name}}</option></select></label>
@@ -4791,10 +5478,14 @@ function panelComponent(controller) {
                                     <p class="mcpskins-muted">Only Save Skin writes registry changes. Model and texture edits use Blockbench’s save commands.</p>
                                 </form>
                                 <details v-if="!bulk" class="mcpskins-previews" open><summary>Textures</summary>
-                                    <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button></div>
+                                    <div class="mcpskins-asset-actions"><button type="button" :disabled="s.duplicatePending" @click="command('openModel')">Open Model</button><button type="button" @click="command('openFolder')">Open Folder</button><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
                                     <div v-if="['gun','attachment'].includes(s.draft.kind)" class="mcpskins-model-mode"><button type="button" :disabled="!s.selectedKey || s.dirty || s.duplicatePending" @click="command('toggleCustomModel')" :title="s.customModel ? 'Disable the geometry override and keep the model as an editing reference' : 'Enable this skin geometry as an in-game model override'">{{s.customModel ? 'Use Stock Model' : 'Use Custom Model'}}</button><small class="mcpskins-muted">{{s.customModel ? 'Custom geometry is enabled in game.' : 'Stock geometry in game. Open Model uses an editing reference.'}}</small></div>
+                                    <section v-if="s.draft.kind==='gun'" class="mcpskins-lod"><h4>LOD</h4>
+                                        <div v-for="file in s.lodFiles" :key="file.kind" class="mcpskins-lod-file"><span class="mcpskins-lod-status" :class="'mcpskins-lod-'+file.status" :title="file.message" :aria-label="file.status+': '+file.message">{{file.status==='valid'?'✓':file.status==='invalid'?'!':'×'}}</span><span>{{file.label}}<small class="mcpskins-muted" :title="file.path">{{file.filename}}</small></span></div>
+                                        <button type="button" :disabled="!s.selectedKey || s.dirty || s.duplicatePending" @click="command('generateLOD')" title="Copy the saved full model and painted textures, including normal and specular maps, for LOD use">Generate LODs</button>
+                                    </section>
                                     <figure v-for="card in s.previews" :key="card.kind"><figcaption>{{card.label}}</figcaption><div :class="['mcpskins-preview',card.kind]"><img v-if="card.source" :src="card.source" :alt="card.filename" @load="imageLoaded(card,$event)" @error="imageFailed(card)"><span v-else>{{card.message}}<small v-if="card.ratio" class="mcpskins-aspect">Recommended aspect ratio {{card.ratio}}</small></span></div><p class="mcpskins-muted">{{card.filename}}<br>{{card.dimensions}}</p></figure>
-                                    <div class="mcpskins-asset-actions mcpskins-animation-action"><button type="button" :disabled="s.duplicatePending || !s.selectedKey" @click="command('openAnimatedTextures')" title="Open the native Flipbook Editor or import animation frames for a saved skin">Animated Textures (Advanced)</button></div>
+
                                 </details>
                             </div>
                         </template>
@@ -5117,6 +5808,47 @@ const weaponPicker = {
 module.exports = {weaponPicker};
 
 },
+"src/ui/collection-picker.js": function(module, exports, require) {
+'use strict';
+const collectionPicker = {
+    props:{value:{type:String,default:''},collections:{type:Array,default:()=>[]},mixed:{type:Boolean,default:false}},
+    data() {return {open:false};},
+    computed:{
+        options() {
+            const names=new Map();
+            for(const name of [...this.collections,this.value]) if(typeof name==='string' && name.trim() && name.trim()!=='*' && !names.has(name.trim().toLowerCase())) names.set(name.trim().toLowerCase(),name.trim());
+            return [...names.values()].sort((a,b)=>a.localeCompare(b));
+        },
+        listId() {return 'mcpskins_collections_'+this._uid;}
+    },
+    methods:{
+        toggle() {this.open=!this.open;if(this.open)this.$emit('open');},
+        choose(name) {this.open=false;this.$emit('input',name);this.$refs.trigger.focus();},
+        create() {this.open=false;this.$refs.trigger.focus();this.$emit('create');},
+        blur(event) {if(!this.$el.contains(event.relatedTarget))this.open=false;},
+        keydown(event) {
+            if(event.key==='Escape' && this.open) {event.preventDefault();event.stopPropagation();this.open=false;this.$refs.trigger.focus();return;}
+            if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;
+            event.preventDefault();event.stopPropagation();
+            const wasOpen=this.open;if(!wasOpen){this.open=true;this.$emit('open');}
+            this.$nextTick(()=>{
+                const items=[...this.$el.querySelectorAll('[data-collection-item]')],index=items.indexOf(event.target);
+                const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowDown'?(index+1)%items.length:index<0?items.length-1:(index-1+items.length)%items.length;
+                if(items[next])items[next].focus();
+            });
+        }
+    },
+    template:`<div class="mcpskins-collection-picker" @focusout="blur" @keydown="keydown">
+        <button ref="trigger" type="button" class="mcpskins-collection-trigger" :aria-expanded="open?'true':'false'" :aria-controls="listId" aria-haspopup="listbox" aria-label="Collection" @click="toggle"><span>{{mixed ? 'Mixed values' : value || 'Choose a collection'}}</span><span aria-hidden="true">▾</span></button>
+        <div v-if="open" class="mcpskins-collection-menu">
+            <div :id="listId" role="listbox" aria-label="Collections"><button v-for="name in options" :key="name" type="button" data-collection-item role="option" :aria-selected="name.toLowerCase()===value.toLowerCase() && !mixed ? 'true':'false'" @click="choose(name)">{{name}}</button><p v-if="!options.length" class="mcpskins-muted">No collections yet.</p></div>
+            <button type="button" data-collection-item class="mcpskins-new-collection" @click="create">+ New Collection</button>
+        </div>
+    </div>`
+};
+module.exports = {collectionPicker};
+
+},
 "src/ui/start-screen.js": function(module, exports, require) {
 'use strict';
 const {panelComponent} = require("src/ui/panel.js");
@@ -5323,6 +6055,29 @@ module.exports = `
 .mcpskins-settings-footer > p {font-size:11px}
 .mcpskins-settings-reset {border-top:1px solid var(--color-border);margin-top:20px;padding-top:14px}
 .mcpskins-settings-reset button {color:#e05a5a}
+.mcpskins-export {font-size:13px;max-height:76vh;overflow:auto}
+.mcpskins-export p {color:var(--color-subtle_text);line-height:1.5}
+.mcpskins-export input:not([type=checkbox]) {box-sizing:border-box;min-height:30px;width:100%;padding:5px 8px;background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px}
+.mcpskins-export-name {display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;margin:12px 0}
+.mcpskins-export-name label {display:flex;flex-direction:column;gap:5px}
+.mcpskins-export-toolbar,.mcpskins-export-actions {display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}
+.mcpskins-export-toolbar strong {flex:1}
+.mcpskins-export-selection {display:grid;grid-template-columns:minmax(180px,1fr) minmax(280px,2fr);gap:18px}
+.mcpskins-export-selection aside {max-height:340px;overflow:auto;border-right:1px solid var(--color-border);padding-right:12px}
+.mcpskins-export-selection h3 {font-size:14px;font-weight:700;margin:12px 0 8px}
+.mcpskins-export-selection label {display:flex;align-items:center;gap:7px;padding:6px 0;overflow-wrap:anywhere}
+.mcpskins-export input[type=checkbox] {position:static;flex:0 0 24px;width:24px;height:24px;min-width:24px;margin:0;padding:0;transform:none;border:0;background:transparent}
+.mcpskins-export-skins {max-height:300px;overflow:auto;margin-top:8px}
+.mcpskins-export-skins label {border-bottom:1px solid var(--color-border)}
+.mcpskins-export-skins small {display:block;color:var(--color-subtle_text);font-size:11px;margin-top:3px}
+.mcpskins-export-actions {justify-content:flex-end}
+.mcpskins-export-note {font-size:11px}
+.mcpskins-export-separator {border:0;border-top:1px solid var(--color-border);margin:14px 0 10px}
+.mcpskins-export-flag {font-size:16px}
+.mcpskins-custom-status {--mc-muted:var(--color-subtle_text);--mc-text:var(--color-text)}
+.mcpskins-custom-status label {display:flex;flex-direction:column;gap:7px;margin:12px 0}
+.mcpskins-custom-status input:not([type=color]) {width:100%;min-height:30px;padding:5px 8px;background:var(--color-dark);color:var(--color-text);border:1px solid var(--color-border);border-radius:3px}
+.mcpskins-custom-status input[type=color] {width:42px;height:32px;padding:0;border:0}
 .mcpskins-help-links {display:flex;justify-content:center;gap:14px;padding:8px 0 14px}
 .mcpskins-help .mcpskins-help-links button {display:inline-flex;align-items:center;justify-content:center;flex:0 0 72px;width:72px;min-width:72px;max-width:72px;height:72px;min-height:72px;padding:8px;margin:0;border-radius:6px}
 .mcpskins-help-links img {display:block;width:100%;height:100%;object-fit:contain}
@@ -5391,6 +6146,14 @@ module.exports = `
 .mcpskins-level-goals input {width:100%;min-width:0}
 .mcpskins-weapon-field {display:flex;flex-direction:column;gap:4px}
 .mcpskins-weapon-picker {position:relative;min-width:0}
+.mcpskins-collection-picker {position:relative;min-width:0}
+.mcpskins .mcpskins-collection-trigger {display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0;min-height:30px;background:var(--mc-field);color:var(--mc-text);text-align:left}
+.mcpskins-collection-trigger span:first-child {overflow:hidden;text-overflow:ellipsis}
+.mcpskins-collection-menu {position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:30;background:var(--mc-panel);border:1px solid var(--mc-border);border-radius:4px;box-shadow:0 4px 12px #0005;padding:4px}
+.mcpskins-collection-menu [role=listbox] {max-height:210px;overflow-x:hidden;overflow-y:auto}
+.mcpskins .mcpskins-collection-menu button {display:block;width:100%;min-width:0;text-align:left;white-space:normal;overflow-wrap:anywhere;border:0;background:transparent;box-shadow:none;padding:7px 9px}
+.mcpskins .mcpskins-collection-menu button:hover,.mcpskins .mcpskins-collection-menu button[aria-selected=true] {background:var(--mc-selected)}
+.mcpskins .mcpskins-collection-menu .mcpskins-new-collection {border-top:1px solid var(--mc-border);margin-top:4px;color:var(--mc-accent)}
 .mcpskins-weapon-input {display:flex;gap:4px;align-items:stretch}
 .mcpskins-weapon-input input {width:100%;min-width:0;flex:1}
 .mcpskins .mcpskins-weapon-toggle {flex:0 0 32px;width:32px;min-width:32px;padding:0}
@@ -5406,7 +6169,13 @@ module.exports = `
 .mcpskins-title {display:block;overflow-wrap:anywhere}
 .mcpskins-color,.mcpskins-save,.mcpskins-asset-actions {display:flex;gap:6px;flex-wrap:wrap}
 .mcpskins-animation-action {margin-top:12px}
-.mcpskins-model-mode {margin-top:10px;display:flex;flex-direction:column;align-items:flex-start;gap:5px}
+.mcpskins-model-mode {margin-top:10px;padding-top:10px;border-top:1px solid var(--mc-border);display:flex;flex-direction:column;align-items:flex-start;gap:5px}
+.mcpskins-lod {border-top:1px solid var(--mc-border);margin-top:12px;padding-top:10px}
+.mcpskins-lod h4 {font-weight:700;margin-bottom:8px}
+.mcpskins-lod-file {display:flex;align-items:flex-start;gap:8px;margin:8px 0}
+.mcpskins-lod-file small {display:block;font-size:11px;overflow-wrap:anywhere;margin-top:3px}
+.mcpskins-lod-status {display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;font-weight:700;font-size:17px}
+.mcpskins-lod-valid {color:#43B873}.mcpskins-lod-invalid {color:#E9B949}.mcpskins-lod-missing {color:#E05A5A}
 .mcpskins-color input {width:100px;flex:1;min-width:80px}
 .mcpskins-color .mcpskins-swatch {width:30px;min-width:30px}
 .mcpskins-previews {margin-top:12px;min-width:0}

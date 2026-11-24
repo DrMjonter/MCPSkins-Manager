@@ -9,6 +9,7 @@ class PackPaths {
         if (!validComponent(folder) || !validComponent(namespace)) throw new Error('Pack folder and namespace must be single folder components.');
         this.path = path;
         this.modelReferences = {};
+        this.lodReferences = {};
         this.root = path.resolve(root);
         this.folder = folder;
         this.namespace = namespace;

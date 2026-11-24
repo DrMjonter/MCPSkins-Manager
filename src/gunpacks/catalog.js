@@ -152,7 +152,7 @@ class GunPackCatalog {
         if (!model || !texture) throw new Error((kind === 'attachment' ? 'This attachment has no standalone model and UV texture to open. ' : 'Item display must define a model and texture. ') + displayResource);
         const texturePath = resourcePath(display.texture, 'textures', '.png');
         const read = entry => entry ? this.read(entry) : null;
-        return {modelRef: display.model, editorOnly, source: index.source.name, model: () => read(model), texture: () => read(texture),
+        return {modelRef: display.model, lodModelRef:kind==='gun' && display.lod ? display.lod.model || null : null, editorOnly, source: index.source.name, model: () => read(model), texture: () => read(texture),
             normal: () => read(this.select(texturePath.slice(0, -4) + '_n.png', texture.source.id, true)),
             specular: () => read(this.select(texturePath.slice(0, -4) + '_s.png', texture.source.id, true)),
             icon: () => read(get(editorOnly ? display.slot_texture || display.slot : display.slot, 'textures', '.png', true)),
